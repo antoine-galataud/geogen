@@ -1,0 +1,38 @@
+name: tests
+concurrency: tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    name: Test GeoGen
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Poetry
+        uses: abatilo/actions-poetry@v4.0.0
+        with:
+          poetry-version: "1.8.4"
+
+      - name: Setup python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "poetry"
+
+      - name: Install Python dependencies from poetry.lock
+        env:
+          PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
+        run: poetry install -n
+
+      - name: Run Python common tests
+        run: poetry run pytest tests/ -v

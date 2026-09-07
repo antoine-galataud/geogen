@@ -1,0 +1,29 @@
+[tool.poetry]
+name = "geogen"
+version = "0.1.0"
+description = "Generate OpenStudio geometry models (.osm) from French building open data (BDNB)"
+authors = ["Antoine Galataud"]
+readme = "README.md"
+packages = [{include = "geogen", from = "src"}]
+
+[tool.poetry.dependencies]
+python = ">=3.12,<3.13"
+openstudio = ">=3.11.0,<3.12.0"
+requests = ">=2.32,<3.0"
+click = ">=8.1,<9.0"
+shapely = ">=2.0,<3.0"
+pyproj = ">=3.6,<4.0"
+
+[tool.poetry.scripts]
+geogen = "geogen.cli:main"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3"
+responses = "^0.25"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["poetry-core>=1.0.0,<2.0.0"]
+build-backend = "poetry.core.masonry.api"

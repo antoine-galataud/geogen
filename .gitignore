@@ -14,3 +14,4 @@ htmlcov/
 .poetry-version
 .idea/
 node_modules
+requirements.txt

@@ -2,7 +2,7 @@
 name = "geogen"
 version = "0.1.0"
 description = "Generate OpenStudio geometry models (.osm) from French building open data (BDNB)"
-authors = ["Antoine Galataud"]
+authors = ["Antoine Galataud", "Davide Coraci"]
 readme = "README.md"
 packages = [{include = "geogen", from = "src"}]
 

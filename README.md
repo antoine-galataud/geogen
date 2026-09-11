@@ -6,7 +6,9 @@ Generate geometry model in OpenStudio format from building open data (BDNB)
 postal addresses in the [BDNB](https://bdnb.io) (*Base de Données Nationale des
 Bâtiments*), downloads their footprint, height and storey count, and writes an
 OpenStudio model (`.osm`) containing the corresponding geometry. It can also produce an
-EnergyPlus IDF file (`.idf`) instead, by forward translating the OpenStudio model.
+EnergyPlus IDF file (`.idf`) instead, by forward translating the OpenStudio model. An
+optional vector SVG preview can be generated from the same geometry for dashboards and
+report generation.
 
 The envelope is completed with windows and with a sloped roof when the BDNB
 describes them, as an approximation. Nothing else is generated: no construction
@@ -38,6 +40,9 @@ you'll get a quota of 10000 requests per month.
 export BDNB_API_KEY=<your-api-key>
 poetry run geogen "1 rue de la Paix, Paris"
 # Wrote bdnb-bg-1234.osm with 1 building(s), 1 footprint(s), 3 space(s) and 6 window(s)
+
+# Generate the OSM and a report-ready SVG preview in the same run
+poetry run geogen "1 rue de la Paix, Paris" -o building.osm --svg-output building.svg
 ```
 
 The model is named after the BDNB code of the building group (or of the building
@@ -59,6 +64,11 @@ full list of options:
 | `-o, --output`           | Path of the generated model file (default: the name of the building)    |
 | `-k, --api-key`          | BDNB API key, defaults to `$BDNB_API_KEY`                               |
 | `--name`                 | Name of the building of the model (default: its BDNB code)              |
+| `--svg-output`           | Optional path of a vector SVG 3D preview                                |
+| `--svg-width`            | SVG canvas width (default `1200`)                                       |
+| `--svg-height`           | SVG canvas height (default `900`)                                       |
+| `--svg-azimuth`          | Orthographic camera azimuth (default `45` degrees)                      |
+| `--svg-elevation`        | Orthographic camera elevation (default `28` degrees)                    |
 | `--output-format`        | Format of the generated model, `osm` or `idf` (default `osm`)           |
 | `--storey-height`        | Storey height used when the BDNB data is incomplete (default `3.0` m)   |
 | `--simplify-tolerance`   | Footprint simplification tolerance in metres (default `0.1`)            |
@@ -69,6 +79,23 @@ full list of options:
 | `--base-url`             | Base URL of the BDNB API, defaults to `$BDNB_BASE_URL`                  |
 | `--timeout`              | Timeout of the API requests in seconds                                  |
 | `-v, --verbose`          | Print debug information                                                 |
+
+### SVG preview
+
+`--svg-output` generates a lightweight orthographic vector preview from the same
+BDNB-derived footprints used to create the OpenStudio model. The SVG is intended as a
+presentation/report asset; the `.osm` remains the authoritative simulation geometry.
+Walls, roofs, storey separators and windows are emitted with CSS classes (`wall`, `roof`,
+`window`, `storey-line`) so a downstream report generator can restyle them without
+regenerating the geometry.
+
+Example:
+
+```bash
+poetry run geogen "122 Rue Amelot, 75011 Paris, France" \
+  -o 122_rue_amelot.osm \
+  --svg-output 122_rue_amelot.svg
+```
 
 ## How it works
 

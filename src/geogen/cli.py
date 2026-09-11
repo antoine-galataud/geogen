@@ -38,6 +38,14 @@ from geogen.osm import (
     model_name,
     save_model,
 )
+from geogen.svg import (
+    DEFAULT_CAMERA_AZIMUTH,
+    DEFAULT_CAMERA_ELEVATION,
+    DEFAULT_SVG_HEIGHT,
+    DEFAULT_SVG_WIDTH,
+    SvgError,
+    save_svg,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -63,6 +71,40 @@ LOGGER = logging.getLogger(__name__)
     "--name",
     default=None,
     help="Name of the building in the model. Defaults to the BDNB code of the building group.",
+)
+@click.option(
+    "--svg-output",
+    type=click.Path(dir_okay=False, writable=True, path_type=Path),
+    default=None,
+    help="Optional path of an SVG 3D preview generated from the same building footprints.",
+)
+@click.option(
+    "--svg-width",
+    type=click.IntRange(min=100),
+    default=DEFAULT_SVG_WIDTH,
+    show_default=True,
+    help="Width in pixels of the SVG preview canvas.",
+)
+@click.option(
+    "--svg-height",
+    type=click.IntRange(min=100),
+    default=DEFAULT_SVG_HEIGHT,
+    show_default=True,
+    help="Height in pixels of the SVG preview canvas.",
+)
+@click.option(
+    "--svg-azimuth",
+    type=float,
+    default=DEFAULT_CAMERA_AZIMUTH,
+    show_default=True,
+    help="Azimuth in degrees of the orthographic SVG camera.",
+)
+@click.option(
+    "--svg-elevation",
+    type=click.FloatRange(min=0, max=90, max_open=True),
+    default=DEFAULT_CAMERA_ELEVATION,
+    show_default=True,
+    help="Elevation in degrees of the orthographic SVG camera.",
 )
 @click.option(
     "--output-format",
@@ -137,6 +179,11 @@ def main(
     api_key: str,
     output: Path | None,
     name: str | None,
+    svg_output: Path | None,
+    svg_width: int,
+    svg_height: int,
+    svg_azimuth: float,
+    svg_elevation: float,
     output_format: str,
     storey_height: float,
     simplify_tolerance: float,
@@ -177,7 +224,18 @@ def main(
             output or Path(model_file_name(building_name, model_file_suffix(output_format))),
             output_format=output_format,
         )
-    except ModelError as error:
+        svg_destination = None
+        if svg_output is not None:
+            svg_destination = save_svg(
+                footprints,
+                svg_output,
+                width=svg_width,
+                height=svg_height,
+                azimuth=svg_azimuth,
+                elevation=svg_elevation,
+                max_roof_height=max_roof_height,
+            )
+    except (ModelError, SvgError) as error:
         raise click.ClickException(str(error)) from error
 
     click.echo(
@@ -185,6 +243,8 @@ def main(
         f"{len(footprints)} footprint(s), {len(model.getSpaces())} space(s) and "
         f"{len(model.getSubSurfaces())} window(s)"
     )
+    if svg_destination is not None:
+        click.echo(f"Wrote SVG preview {svg_destination}")
 
 
 def _download_buildings(

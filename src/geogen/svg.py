@@ -19,6 +19,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+from shapely.strtree import STRtree
+
 from geogen.envelope import DEFAULT_MAX_ROOF_HEIGHT, cardinal_point
 from geogen.geometry import (
     Footprint,
@@ -238,9 +242,114 @@ def _build_scene(
                 drawables.append(_wall_drawable(wall_footprint, edge_index, base_z, projection))
         drawables.extend(_roof_drawables(footprint, base_z, projection, max_roof_height))
 
-    # Orthographic painter's algorithm: far groups first, near groups last.
+    # Coarse ordering only; exact visibility masks resolve local depth reversals.
     drawables.sort(key=lambda drawable: drawable.depth)
     return drawables
+
+
+@dataclass(frozen=True)
+class _ProjectedFace:
+    polygon: Polygon
+    # Depth = a*x + b*y + c in orthographic screen coordinates (Y up).
+    plane: tuple[float, float, float]
+
+
+def _projected_face(drawable: _Drawable, projection: _Projection) -> _ProjectedFace | None:
+    points = [projection.camera(p) for p in drawable.primitives[0][1]]
+    polygon = Polygon([(x, y) for x, y, depth in points])
+    if polygon.is_empty or polygon.area < 1e-10:
+        return None  # a face seen exactly edge-on has no opaque area
+    x0, y0, d0 = points[0]
+    for i in range(1, len(points) - 1):
+        x1, y1, d1 = points[i]
+        x2, y2, d2 = points[i + 1]
+        determinant = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
+        if abs(determinant) < 1e-10:
+            continue
+        a = ((d1 - d0) * (y2 - y0) - (d2 - d0) * (y1 - y0)) / determinant
+        b = ((x1 - x0) * (d2 - d0) - (x2 - x0) * (d1 - d0)) / determinant
+        return _ProjectedFace(polygon, (a, b, d0 - a * x0 - b * y0))
+    return None
+
+
+def _nearer_region(overlap, plane: tuple[float, float, float]):
+    """Clip overlap to the half-plane where the occluder is in front.
+
+    A single mean depth cannot order long roofs or intersecting projected faces. Comparing
+    their affine depth functions gives the correct visible portion.
+    """
+    a, b, c = plane
+    xmin, ymin, xmax, ymax = overlap.bounds
+    corners = [(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax)]
+
+    def distance(p):
+        return a * p[0] + b * p[1] + c - 1e-7
+
+    values = [distance(p) for p in corners]
+    if max(values) <= 0:
+        return None
+    if min(values) >= 0:
+        return overlap
+    clipped = []
+    for start, end in zip(corners, corners[1:] + corners[:1]):
+        ds, de = distance(start), distance(end)
+        if ds >= 0:
+            clipped.append(start)
+        if (ds >= 0) != (de >= 0):
+            t = ds / (ds - de)
+            clipped.append((start[0] + t * (end[0] - start[0]), start[1] + t * (end[1] - start[1])))
+    if len(clipped) < 3:
+        return None
+    return overlap.intersection(Polygon(clipped))
+
+
+def _visible_regions(drawables: list[_Drawable], projection: _Projection) -> list:
+    """Exact planar visibility masks for opaque faces, kept as vector geometry.
+
+    Wall decorations share their wall's mask. STRtree limits comparisons to overlapping
+    screen bounds. Courtyards are not filled by the clipping masks.
+    """
+    faces = [_projected_face(d, projection) for d in drawables]
+    polygons = [f.polygon if f else Polygon() for f in faces]
+    tree = STRtree(polygons)
+    visible = []
+    for i, face in enumerate(faces):
+        if face is None:
+            visible.append(Polygon())
+            continue
+        occluded = []
+        for j in tree.query(face.polygon):
+            if i == j or faces[j] is None:
+                continue
+            other = faces[j]
+            overlap = face.polygon.intersection(other.polygon)
+            if overlap.is_empty or overlap.area < 1e-10:
+                continue
+            difference = tuple(x - y for x, y in zip(other.plane, face.plane))
+            nearer = _nearer_region(overlap, difference)
+            if nearer is not None and not nearer.is_empty:
+                occluded.append(nearer)
+        visible.append(face.polygon.difference(unary_union(occluded)) if occluded else face.polygon)
+    return visible
+
+
+def _clip_path_data(geometry, canvas) -> str:
+    """Encode all visible polygon parts and holes using the even-odd fill rule."""
+    parts = [geometry] if isinstance(geometry, Polygon) else list(getattr(geometry, "geoms", []))
+    commands = []
+    for part in parts:
+        if not isinstance(part, Polygon):
+            continue
+        for ring in (part.exterior, *part.interiors):
+            points = [canvas(p) for p in ring.coords[:-1]]
+            if not points:
+                continue
+            commands.append(
+                f"M {points[0][0]:.6f},{points[0][1]:.6f} "
+                + " ".join(f"L {x:.6f},{y:.6f}" for x, y in points[1:])
+                + " Z"
+            )
+    return " ".join(commands)
 
 
 def _all_projected_points(drawables: Iterable[_Drawable], projection: _Projection) -> list[Point2D]:
@@ -284,7 +393,7 @@ def _canvas_transform(points: list[Point2D], width: int, height: int, margin: fl
 
 
 def _points_attribute(points: Iterable[Point2D]) -> str:
-    return " ".join(f"{x:.2f},{y:.2f}" for x, y in points)
+    return " ".join(f"{x:.6f},{y:.6f}" for x, y in points)
 
 
 def save_svg(
@@ -357,9 +466,27 @@ def save_svg(
         },
     )
 
+    definitions = ET.SubElement(svg, f"{{{_SVG_NS}}}defs")
     scene = ET.SubElement(svg, f"{{{_SVG_NS}}}g", {"id": "scene"})
-    for drawable in drawables:
-        group = ET.SubElement(scene, f"{{{_SVG_NS}}}g")
+    visible_regions = _visible_regions(drawables, projection)
+    for index, (drawable, visible) in enumerate(zip(drawables, visible_regions)):
+        if visible.is_empty or visible.area < 1e-10:
+            continue
+        identifier = f"visible-face-{index}"
+        clip = ET.SubElement(
+            definitions,
+            f"{{{_SVG_NS}}}clipPath",
+            {"id": identifier, "clipPathUnits": "userSpaceOnUse"},
+        )
+        ET.SubElement(
+            clip,
+            f"{{{_SVG_NS}}}path",
+            {
+                "d": _clip_path_data(visible, canvas),
+                "clip-rule": "evenodd",
+            },
+        )
+        group = ET.SubElement(scene, f"{{{_SVG_NS}}}g", {"clip-path": f"url(#{identifier})"})
         for primitive, points_3d, css_class in drawable.primitives:
             projected = [canvas(projection.project(point)) for point in points_3d]
             if primitive == "polygon":

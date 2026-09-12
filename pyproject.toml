@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "geogen"
 version = "0.1.0"
-description = "Generate OpenStudio geometry models (.osm) from French building open data (BDNB)"
+description = "Generate OpenStudio and EnergyPlus geometry from French and British building data"
 authors = ["Antoine Galataud", "Davide Coraci"]
 readme = "README.md"
 packages = [{include = "geogen", from = "src"}]

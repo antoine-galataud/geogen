@@ -95,6 +95,8 @@ OS Building Features (Building v4).
    - OS NGD API - Features
 1. Copy the generated API key for your project.
 
+Note: OS APIs don't have fenestration info.
+
 Set its key:
 
 ```bash

@@ -115,7 +115,7 @@ def test_reports_unknown_addresses(tmp_path: Path) -> None:
     result = CliRunner().invoke(
         main,
         [
-            "nowhere",
+            "nowhere, France",
             "--api-key",
             "secret-key",
             "--base-url",
@@ -151,9 +151,12 @@ def test_reports_api_errors(tmp_path: Path) -> None:
     assert "failed" in result.output
 
 
-def test_doesnt_require_an_api_key(tmp_path: Path) -> None:
+@responses.activate
+def test_doesnt_require_an_api_key(tmp_path: Path, building_row: dict) -> None:
+    _register_api(building_row)
     result = CliRunner(env={"BDNB_API_KEY": ""}).invoke(
-        main, ["1 rue de la Paix Paris", "--output", str(tmp_path / "model.osm")]
+        main,
+        ["1 rue de la Paix Paris", "--base-url", BASE_URL, "--output", str(tmp_path / "model.osm")],
     )
 
     assert result.exit_code == 0

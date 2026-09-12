@@ -17,6 +17,9 @@ from typing import Any
 
 import requests
 
+from geogen.models import AddressNotFoundError as ProviderAddressNotFoundError
+from geogen.models import ProviderError
+
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://api.bdnb.io/v1/bdnb"
@@ -106,7 +109,7 @@ UNKNOWN_TABLE_CODES = frozenset({"PGRST205", "42P01"})
 _UNKNOWN_COLUMN_RE = re.compile(r"column\s+\"?(?:[\w.]+\.)?(\w+)\"?\s+does not exist", re.I)
 
 
-class BdnbError(RuntimeError):
+class BdnbError(ProviderError):
     """Raised when the BDNB API cannot be reached or returns an error."""
 
     def __init__(self, message: str, *, status: int | None = None, payload: Any = None) -> None:
@@ -131,7 +134,7 @@ class BdnbError(RuntimeError):
         return ""
 
 
-class AddressNotFoundError(BdnbError):
+class AddressNotFoundError(BdnbError, ProviderAddressNotFoundError):
     """Raised when an address does not match any entry of the BDNB."""
 
 

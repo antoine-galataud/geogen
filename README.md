@@ -84,7 +84,18 @@ full list of options:
 
 Create an [OS Data Hub API project](https://docs.os.uk/os-apis/core-concepts/getting-started-with-an-api-project)
 with **both OS Places API and OS NGD API – Features** enabled, and access to
-OS Building Features (Building v4). Set its key:
+OS Building Features (Building v4).
+
+#### How to register for an OS Data Hub API key
+
+1. Sign in or create an account at [OS Data Hub](https://osdatahub.os.uk/).
+1. Create a new project in the [API Projects](https://osdatahub.os.uk/projects) section.
+1. Enable the following APIs for your project:
+   - OS Places API: a free trial is available for testing, without a credit card.
+   - OS NGD API - Features
+1. Copy the generated API key for your project.
+
+Set its key:
 
 ```bash
 export OS_API_KEY="your-project-key"

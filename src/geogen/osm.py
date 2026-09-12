@@ -12,13 +12,18 @@ import openstudio
 from openstudio import model as osmodel
 
 from geogen.envelope import DEFAULT_MAX_ROOF_HEIGHT, cardinal_point
-from geogen.geometry import LAMBERT_93, Footprint, bounding_center, roof_apex, to_wgs84
+from geogen.geometry import (
+    Footprint,
+    bounding_center,
+    exterior_ring,
+    floor_patches,
+    roof_sections,
+    to_wgs84,
+)
 
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_BUILDING_NAME = "BDNB buildings"
-#: Roof faces smaller than this area (m²) cannot be modelled.
-MIN_ROOF_FACE_AREA = 1e-3
 _UNSAFE_FILE_NAME_RE = re.compile(r"[^\w.-]+")
 
 
@@ -57,7 +62,7 @@ def build_model(
     origin: tuple[float, float] | None = None,
     building_name: str = DEFAULT_BUILDING_NAME,
     max_roof_height: float = DEFAULT_MAX_ROOF_HEIGHT,
-    crs: str = LAMBERT_93,
+    crs: str | None = None,
 ) -> osmodel.Model:
     """Build an OpenStudio model made of one space per storey of each footprint.
 
@@ -69,6 +74,10 @@ def build_model(
     footprints = list(footprints)
     if not footprints:
         raise ModelError("At least one footprint is required to build a model")
+    coordinate_systems = {footprint.crs for footprint in footprints}
+    if len(coordinate_systems) != 1:
+        raise ModelError("Footprints must be transformed to one common CRS")
+    crs = crs or footprints[0].crs
     if origin is None:
         origin = bounding_center(footprints)
 
@@ -100,12 +109,16 @@ def build_model(
         extruded.append((footprint, storeys))
         for space in storeys:
             spaces.append(space)
-        attic = _add_roof(model, footprint, origin, base_elevation, max_roof_height)
-        if attic is not None:
+        for attic in _add_roof(model, footprint, origin, base_elevation, max_roof_height):
             spaces.append(attic)
     if not spaces:
         raise ModelError("None of the footprints could be extruded into a space")
 
+    # ForwardTranslator omits spaces without a zone, including all their geometry.
+    for space in spaces:
+        zone = osmodel.ThermalZone(model)
+        zone.setName(f"{space.nameString()} Zone")
+        space.setThermalZone(zone)
     LOGGER.info("Built %d spaces from %d footprints", len(spaces), len(footprints))
     osmodel.intersectSurfaces(spaces)
     osmodel.matchSurfaces(spaces)
@@ -149,14 +162,22 @@ def _add_storeys(
     storey_height = footprint.storey_height
     spaces: list[osmodel.Space] = []
     for level in range(footprint.storeys):
-        optional_space = osmodel.Space.fromFloorPrint(floor_print, storey_height, model)
-        if not optional_space.is_initialized():
+        optional_space = (
+            None
+            if footprint.holes
+            else osmodel.Space.fromFloorPrint(floor_print, storey_height, model)
+        )
+        if optional_space is not None and not optional_space.is_initialized():
             _remove_spaces(spaces)
             raise ModelError(
                 f"OpenStudio could not create a space for footprint {footprint.name!r}"
             )
         elevation = base_elevation + level * storey_height
-        space = optional_space.get()
+        space = (
+            _courtyard_space(model, footprint, origin, storey_height)
+            if footprint.holes
+            else optional_space.get()
+        )
         space.setName(f"{footprint.name} Storey {level + 1} Space")
         space.setZOrigin(elevation)
 
@@ -175,54 +196,33 @@ def _add_roof(
     origin: tuple[float, float],
     base_elevation: float,
     max_roof_height: float,
-) -> osmodel.Space | None:
-    """Cover a footprint with a hip roof, as an attic space above its storeys.
+) -> list[osmodel.Space]:
+    """Create one enclosed attic per inferred roof wing.
 
-    Nothing is added when the BDNB does not describe a sloped roof, or when the roof cannot
-    be built, the flat roof of the top storey is then left as is.
+    Independent roofs meeting at zero-height eaves cannot be put into one manifold volume.
+    Separate spaces keep every edge paired exactly twice.
     """
-    pitch = footprint.envelope.roof_pitch
-    if not pitch:
-        return None
-    apex = roof_apex(footprint.ring, pitch, max_roof_height)
-    if apex is None:
-        LOGGER.debug("No sloped roof could be built for footprint %s", footprint.name)
-        return None
-    origin_x, origin_y = origin
-    apex_point = openstudio.Point3d(apex[0] - origin_x, apex[1] - origin_y, apex[2])
-
-    space = osmodel.Space(model)
-    space.setName(f"{footprint.name} Attic Space")
-    space.setZOrigin(base_elevation + footprint.height)
-    ring = _floor_print(footprint, origin)
-    surfaces: list[osmodel.Surface] = []
-    try:
-        surfaces.append(osmodel.Surface(ring, model))
-        for index, start in enumerate(ring):
-            end = ring[(index + 1) % len(ring)]
-            face = openstudio.Point3dVector()
-            face.append(end)
-            face.append(start)
-            face.append(apex_point)
-            surface = osmodel.Surface(face, model)
-            surfaces.append(surface)
-            if surface.grossArea() < MIN_ROOF_FACE_AREA:
-                raise ModelError(f"degenerate roof face of footprint {footprint.name!r}")
-        for surface in surfaces:
-            surface.setSpace(space)
-    except (ModelError, RuntimeError) as error:
-        LOGGER.warning("Skipping the roof of footprint %s: %s", footprint.name, error)
-        for surface in surfaces:
-            surface.remove()
-        space.remove()
-        return None
-
-    storey = osmodel.BuildingStory(model)
-    storey.setName(f"{footprint.name} Attic")
-    storey.setNominalZCoordinate(base_elevation + footprint.height)
-    storey.setNominalFloortoFloorHeight(apex[2])
-    space.setBuildingStory(storey)
-    return space
+    sections = roof_sections(footprint, max_roof_height)
+    attics = []
+    for index, (patch, faces) in enumerate(sections, 1):
+        suffix = f" {index}" if len(sections) > 1 else ""
+        space = osmodel.Space(model)
+        space.setName(f"{footprint.name} Attic{suffix} Space")
+        space.setZOrigin(base_elevation + footprint.height)
+        surface = _surface(model, space, [(x, y, 0) for x, y in exterior_ring(patch, 0)], origin)
+        surface.setSurfaceType("Floor")
+        for face in faces:
+            surface = _surface(model, space, face, origin)
+            surface.setSurfaceType("RoofCeiling")
+            surface.setOutsideBoundaryCondition("Outdoors")
+        roof_height = max(z for face in faces for x, y, z in face)
+        storey = osmodel.BuildingStory(model)
+        storey.setName(f"{footprint.name} Attic{suffix}")
+        storey.setNominalZCoordinate(base_elevation + footprint.height)
+        storey.setNominalFloortoFloorHeight(roof_height)
+        space.setBuildingStory(storey)
+        attics.append(space)
+    return attics
 
 
 def _add_windows(footprint: Footprint, spaces: Iterable[osmodel.Space]) -> int:
@@ -289,3 +289,33 @@ def save_model(
     elif not model.save(openstudio.path(str(destination)), True):
         raise ModelError(f"Could not write the OpenStudio model to {destination}")
     return destination
+
+
+def _surface(model, space, vertices, origin):
+    points = openstudio.Point3dVector(
+        [openstudio.Point3d(x - origin[0], y - origin[1], z) for x, y, z in vertices]
+    )
+    surface = osmodel.Surface(points, model)
+    surface.setSpace(space)
+    return surface
+
+
+def _courtyard_space(model, footprint, origin, height):
+    """One closed space with tiled floors/ceilings and outward courtyard walls."""
+    space = osmodel.Space(model)
+    for patch in floor_patches(footprint):
+        ring = exterior_ring(patch, 0)
+        floor = _surface(model, space, [(x, y, 0) for x, y in ring], origin)
+        floor.setSurfaceType("Floor")
+        floor.setOutsideBoundaryCondition("Ground")
+        ceiling = _surface(model, space, [(x, y, height) for x, y in reversed(ring)], origin)
+        ceiling.setSurfaceType("RoofCeiling")
+        ceiling.setOutsideBoundaryCondition("Outdoors")
+    for ring in (footprint.ring, *footprint.holes):
+        for start, end in zip(ring, (*ring[1:], ring[0])):
+            wall = _surface(
+                model, space, [(*end, 0), (*start, 0), (*start, height), (*end, height)], origin
+            )
+            wall.setSurfaceType("Wall")
+            wall.setOutsideBoundaryCondition("Outdoors")
+    return space

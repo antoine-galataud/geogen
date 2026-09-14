@@ -218,15 +218,16 @@ the complete group/block in the same scene.
 
 ## JSON building metadata
 
-`--json-output` exports a machine-readable description of the BDNB building group(s)
-already downloaded by `geogen`.
+`--json-output` exports a machine-readable description of the buildings already
+downloaded by `geogen`, from BDNB, Ordnance Survey, or a mixed-provider portfolio.
 
-No additional BDNB request is required for the main geometry metadata because
+No additional provider request is required for the main geometry metadata because
 `geogen` already retrieves the fields needed to build the model.
 
-The JSON can include, for each building group:
+The JSON can include, for each building:
 
-- BDNB identifier;
+- common `building_id`, `provider`, `country`, and source `crs`;
+- `bdnb_id` for BDNB buildings or unprefixed `os_id` for Ordnance Survey buildings;
 - address;
 - city;
 - footprint area;
@@ -238,7 +239,20 @@ The JSON can include, for each building group:
 - glazing ratio;
 - roof material;
 - roof type;
+- roof shape, when supplied by the provider;
 - a short human-readable building description.
+
+Provider identity comes from the source model, not the country or identifier prefix.
+OS records use `provider: "ordnance_survey"`, `country: "UK"`, and
+`crs: "EPSG:27700"`; they never contain `bdnb_id`. For example, an OS identifier
+`building-1` produces `building_id: "os-building-1"` and `os_id: "building-1"`.
+UK descriptions retain the full address. Generic `Building` records have a null
+provider unless a provider-specific subclass declares one.
+
+Unknown measurements remain `null`: metadata does not substitute the height,
+storey count, or envelope defaults used to generate geometry. Aggregates sum known
+measurements and are `null` if none are known. Glazing ratios retain the source
+units (for example, a BDNB percentage is not converted into a fraction).
 
 Example:
 
@@ -261,6 +275,10 @@ Example JSON structure:
   "total_estimated_floor_area_m2": 2100.0,
   "buildings": [
     {
+      "building_id": "bdnb-bg-1234",
+      "provider": "bdnb",
+      "country": "FR",
+      "crs": "EPSG:2154",
       "bdnb_id": "bdnb-bg-1234",
       "address": "122 Rue Amelot",
       "city": "Paris",
@@ -281,8 +299,8 @@ Example JSON structure:
 
 ### Surface terminology
 
-`footprint_area_m2` corresponds to the building-group footprint area provided by the
-BDNB (`s_geom_groupe`).
+`footprint_area_m2` corresponds to the source footprint area: BDNB
+`s_geom_groupe` or OS `geometry_area_m2`.
 
 `estimated_floor_area_m2` is a derived estimate:
 
@@ -295,23 +313,36 @@ area. The estimate assumes that the footprint is representative of every storey.
 
 ### Multiple buildings
 
-When an address resolves to several BDNB building groups, or when several addresses are
+When an address resolves to several buildings, or when several addresses are
 provided, the JSON contains:
 
 - `building_count`;
 - aggregated `total_footprint_area_m2`;
 - aggregated `total_estimated_floor_area_m2`;
-- one metadata object per building group in the `buildings` array.
+- one metadata object per source building in the `buildings` array, including mixed providers.
 
 This makes the output suitable for both individual buildings and multi-building blocks.
 
 ## How it works
 
-`models.py` defines the common `Building` data contract and `BuildingProvider`
-protocol. `providers.py` handles country routing and adapts the existing BDNB
-client. `ordnance_survey.py` implements the independent OS provider. Shared
+`models.py` defines the common `Building` dataclass and `BuildingProvider`
+protocol. `BuildingGroup(Building)` adds BDNB group/construction identifiers;
+`OsBuilding(Building)` adds the native OS identifier. Shared geometry, height,
+address, and envelope fields are defined only once. These frozen records accept
+their identifier positionally and common attributes by keyword, and support
+`dataclasses.replace()`. The BDNB `Address` record also lives in `models.py`.
+
+`providers.py` handles country routing and resolves the BDNB CRS without discarding
+provider-specific fields. `ordnance_survey.py` implements the independent OS provider. Shared
 `geometry.py`, `envelope.py`, `osm.py` and `svg.py` implement all generation.
-The existing `geogen.bdnb.BdnbClient` and `BuildingGroup` API remains available.
+The existing `geogen.bdnb.BdnbClient`, `Address`, `BuildingGroup`, and
+`BuildingGroup.from_row()` entry points remain available; provider row parsing
+stays in `bdnb.py`.
+
+`metadata.py` exposes `building_metadata()` and `building_description()` for any
+`Building`, plus `portfolio_metadata()` for iterables or mappings of buildings.
+The legacy `building_group_metadata()` and `building_group_description()` names
+remain compatibility wrappers, including the existing BDNB metric fields.
 
 ### UK retrieval and attribute mapping
 

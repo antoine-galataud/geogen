@@ -12,13 +12,14 @@ import json
 import logging
 import re
 from collections import defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Any
 
 import requests
 
+from geogen.models import Address
 from geogen.models import AddressNotFoundError as ProviderAddressNotFoundError
-from geogen.models import ProviderError
+from geogen.models import BuildingGroup, ProviderError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -228,72 +229,29 @@ def _error_payload(response: requests.Response | None) -> Any:
         return None
 
 
-@dataclass(frozen=True)
-class Address:
-    """A postal address of the BDNB, identified by its BAN interop key."""
-
-    cle_interop_adr: str
-    label: str | None = None
-    code_commune_insee: str | None = None
-
-
-@dataclass(frozen=True)
-class BuildingGroup:
-    """A ``batiment_groupe`` of the BDNB, with the data needed for geometry."""
-
-    batiment_groupe_id: str
-    #: Code of the building itself, for the buildings that belong to no group.
-    batiment_construction_id: str | None = None
-    geometry: Any = None
-    height: float | None = None
-    storeys: int | None = None
-    ground_elevation: float | None = None
-    footprint_area: float | None = None
-    fictitious_geometry: bool | None = None
-    address: str | None = None
-    city: str | None = None
-    #: Share of the exterior walls covered by glazing, as published by the BDNB.
-    glazed_ratio: float | None = None
-    #: Glazed area (m²) of the representative dwelling, per cardinal direction.
-    glazed_areas: tuple[tuple[str, float], ...] = ()
-    #: Exterior wall area (m²) of the representative dwelling.
-    wall_area: float | None = None
-    #: Orientations of the glazed bays, in the BDNB wording.
-    glazing_orientations: tuple[str, ...] = ()
-    #: Main material covering the roof.
-    roof_material: str | None = None
-    #: Construction principle of the upper floor, which hints at the roof shape.
-    roof_type: str | None = None
-    #: Exterior walls of the building group, as described by ``wall_dict``.
-    walls: tuple[Any, ...] = ()
-
-    @property
-    def code(self) -> str:
-        """BDNB code of the building group, or of the building when it has no group."""
-        return self.batiment_groupe_id or self.batiment_construction_id or ""
-
-    @classmethod
-    def from_row(cls, row: dict[str, Any]) -> BuildingGroup:
-        """Build a :class:`BuildingGroup` from a ``batiment_groupe_complet`` row."""
-        return cls(
-            batiment_groupe_id=str(row.get("batiment_groupe_id") or ""),
-            batiment_construction_id=_as_code(row.get("batiment_construction_id"))
-            or _as_code(row.get("rnb_id")),
-            geometry=row.get("geom_groupe"),
-            height=_as_float(row.get("hauteur_mean")),
-            storeys=_as_int(row.get("nb_niveau")),
-            ground_elevation=_as_float(row.get("altitude_sol_mean")),
-            footprint_area=_as_float(row.get("s_geom_groupe")),
-            fictitious_geometry=_as_bool(row.get("contient_fictive_geom_groupe")),
-            address=row.get("libelle_adr_principale_ban"),
-            city=row.get("libelle_commune_insee"),
-            glazed_ratio=_as_float(row.get("pourcentage_surface_baie_vitree_exterieur")),
-            glazed_areas=_glazed_areas(row),
-            wall_area=_as_float(row.get("surface_mur_exterieur")),
-            glazing_orientations=_as_str_tuple(row.get("l_orientation_baie_vitree")),
-            roof_material=row.get("materiaux_toiture_simplifie") or row.get("mat_toit_txt"),
-            roof_type=row.get("type_plancher_haut_deperditif"),
-        )
+def building_group_from_row(
+    row: dict[str, Any], *, building_class: type[BuildingGroup] = BuildingGroup
+) -> BuildingGroup:
+    """Parse a ``batiment_groupe_complet`` row without duplicating model fields."""
+    return building_class(
+        batiment_groupe_id=str(row.get("batiment_groupe_id") or ""),
+        batiment_construction_id=_as_code(row.get("batiment_construction_id"))
+        or _as_code(row.get("rnb_id")),
+        geometry=row.get("geom_groupe"),
+        height=_as_float(row.get("hauteur_mean")),
+        storeys=_as_int(row.get("nb_niveau")),
+        ground_elevation=_as_float(row.get("altitude_sol_mean")),
+        footprint_area=_as_float(row.get("s_geom_groupe")),
+        fictitious_geometry=_as_bool(row.get("contient_fictive_geom_groupe")),
+        address=row.get("libelle_adr_principale_ban"),
+        city=row.get("libelle_commune_insee"),
+        glazed_ratio=_as_float(row.get("pourcentage_surface_baie_vitree_exterieur")),
+        glazed_areas=_glazed_areas(row),
+        wall_area=_as_float(row.get("surface_mur_exterieur")),
+        glazing_orientations=_as_str_tuple(row.get("l_orientation_baie_vitree")),
+        roof_material=row.get("materiaux_toiture_simplifie") or row.get("mat_toit_txt"),
+        roof_type=row.get("type_plancher_haut_deperditif"),
+    )
 
 
 class BdnbClient:

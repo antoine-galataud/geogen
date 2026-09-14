@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import fields
+from dataclasses import replace
 
 from geogen.bdnb import BdnbClient
 from geogen.models import Building, ProviderError
@@ -71,17 +71,7 @@ class BdnbProvider:
         if cache_key not in self._cache:
             groups = self.client.buildings_for_address(query, max_buildings=max_buildings)
             self._cache[cache_key] = [
-                Building(
-                    code=group.code,
-                    # BDNB may return geographic coordinates despite its usual Lambert CRS.
-                    crs=_bdnb_crs(group.geometry),
-                    **{
-                        field.name: getattr(group, field.name)
-                        for field in fields(Building)
-                        if hasattr(group, field.name) and field.name != "code"
-                    },
-                )
-                for group in groups
+                replace(group, crs=group.crs or _bdnb_crs(group.geometry)) for group in groups
             ]
         return self._cache[cache_key][:max_buildings]
 

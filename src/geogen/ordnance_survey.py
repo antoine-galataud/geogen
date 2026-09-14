@@ -13,7 +13,7 @@ from urllib.parse import urljoin, urlsplit
 import requests
 from shapely.geometry import Point, shape
 
-from geogen.models import AddressNotFoundError, Building, ProviderError
+from geogen.models import AddressNotFoundError, Building, OsBuilding, ProviderError
 
 PLACES_URL = "https://api.os.uk/search/places/v1"
 NGD_URL = "https://api.os.uk/features/ngd/ofa/v1"
@@ -33,7 +33,7 @@ def number(value: Any, *, positive: bool = False) -> float | None:
     return result if math.isfinite(result) and (not positive or result > 0) else None
 
 
-def building_from_feature(feature: dict, address: str | None = None) -> Building:
+def building_from_feature(feature: dict, address: str | None = None) -> OsBuilding:
     """Normalize the NGD Building v4 schema to metric data."""
     props = feature.get("properties") or {}
     code = props.get("osid") or feature.get("id")
@@ -48,10 +48,8 @@ def building_from_feature(feature: dict, address: str | None = None) -> Building
             roof_shape = "flat"
     floors = number(props.get("numberoffloors"), positive=True)
     elevation = number(props.get("height_absolutemin_m"))
-    return Building(
-        code=f"os-{code}",
-        country="UK",
-        crs=BNG,
+    return OsBuilding(
+        os_id=str(code),
         geometry=feature["geometry"],
         height=height,
         storeys=int(floors) if floors and floors.is_integer() else None,

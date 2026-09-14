@@ -1,5 +1,6 @@
 """Offline OS contract fixtures and full exporter integration tests."""
 
+import json
 from urllib.parse import parse_qs, urlsplit
 
 import openstudio
@@ -193,6 +194,7 @@ def test_bng_dimensions_and_site_location():
 def test_uk_cli_all_exports(tmp_path, output_format):
     register()
     output, svg = tmp_path / f"uk.{output_format}", tmp_path / "uk.svg"
+    metadata = tmp_path / "uk.json"
     result = CliRunner(env={"OS_API_KEY": "secret"}).invoke(
         main,
         [
@@ -204,6 +206,8 @@ def test_uk_cli_all_exports(tmp_path, output_format):
             str(output),
             "--svg-output",
             str(svg),
+            "--json-output",
+            str(metadata),
             "--window-to-wall-ratio",
             "0.2",
         ],
@@ -212,6 +216,17 @@ def test_uk_cli_all_exports(tmp_path, output_format):
     assert "1 building(s)" in result.output
     assert "3 space(s)" in result.output
     assert output.exists() and svg.exists()
+    data = json.loads(metadata.read_text())
+    building = data["buildings"][0]
+    assert data["building_count"] == 1
+    assert data["total_estimated_floor_area_m2"] == 600
+    assert building["building_id"] == "os-building-1"
+    assert building["os_id"] == "building-1"
+    assert building["provider"] == "ordnance_survey"
+    assert building["country"] == "UK"
+    assert building["roof_shape"] == "flat"
+    assert "bdnb_id" not in building
+    assert ADDRESS in building["description"]
     assert "window" in svg.read_text()
     assert len(responses.calls) == 2
     if output_format == "idf":

@@ -21,6 +21,7 @@ from geogen.geometry import (
     GeometryError,
     footprints_from_group,
 )
+from geogen.metadata import portfolio_metadata, save_metadata_json
 from geogen.models import AddressNotFoundError, Building, ProviderError
 from geogen.ordnance_survey import OsClient
 from geogen.osm import (
@@ -62,6 +63,13 @@ LOGGER = logging.getLogger(__name__)
     default=None,
     help="Path of the model to write. Defaults to the name of the building, "
     "that is the provider identifier, in the current directory.",
+)
+@click.option(
+    "--json-output",
+    type=click.Path(dir_okay=False, writable=True, path_type=Path),
+    default=None,
+    help="Path of a JSON file describing the downloaded building(s): "
+    "surface, storeys, height and related metadata.",
 )
 @click.option(
     "--name",
@@ -189,6 +197,7 @@ def main(
     addresses: tuple[str, ...],
     api_key: str,
     output: Path | None,
+    json_output: Path | None,
     name: str | None,
     svg_output: Path | None,
     svg_width: int,
@@ -258,6 +267,10 @@ def main(
                 elevation=svg_elevation,
                 max_roof_height=max_roof_height,
             )
+        metadata_destination = None
+        if json_output is not None:
+            metadata = portfolio_metadata(buildings, source_addresses=addresses)
+            metadata_destination = save_metadata_json(metadata, json_output)
     except (ModelError, SvgError) as error:
         raise click.ClickException(str(error)) from error
 
@@ -268,6 +281,8 @@ def main(
     )
     if svg_destination is not None:
         click.echo(f"Wrote SVG preview {svg_destination}")
+    if json_output is not None:
+        click.echo(f"Wrote building metadata JSON to {metadata_destination}")
 
 
 def _download_buildings(

@@ -17,9 +17,10 @@ import math
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
+from heapq import heappop, heappush
 from pathlib import Path
 
-from shapely.geometry import Polygon
+from shapely.geometry import LineString, Polygon
 from shapely.ops import unary_union
 from shapely.strtree import STRtree
 
@@ -242,9 +243,7 @@ def _build_scene(
                 drawables.append(_wall_drawable(wall_footprint, edge_index, base_z, projection))
         drawables.extend(_roof_drawables(footprint, base_z, projection, max_roof_height))
 
-    # Coarse ordering only; exact visibility masks resolve local depth reversals.
-    drawables.sort(key=lambda drawable: drawable.depth)
-    return drawables
+    return _sort_drawables(drawables, projection)
 
 
 @dataclass(frozen=True)
@@ -272,6 +271,85 @@ def _projected_face(drawable: _Drawable, projection: _Projection) -> _ProjectedF
     return None
 
 
+def _plane_extrema(geometry, plane: tuple[float, float, float]) -> tuple[float, float]:
+    """Return the extrema of an affine plane over polygonal geometry."""
+    a, b, c = plane
+    polygons = [geometry] if isinstance(geometry, Polygon) else geometry.geoms
+    values = [
+        a * x + b * y + c
+        for polygon in polygons
+        if isinstance(polygon, Polygon)
+        for ring in (polygon.exterior, *polygon.interiors)
+        for x, y in ring.coords[:-1]
+    ]
+    return min(values), max(values)
+
+
+def _sort_drawables(drawables: list[_Drawable], projection: _Projection) -> list[_Drawable]:
+    """Sort opaque faces far-to-near using depth over their actual overlap.
+
+    Mean face depth is not sufficient for a tall facade whose visible overlap is behind a
+    shorter roof. Pairwise constraints fix those cases, including faces meeting at an edge.
+    Exact visibility clipping handles depth reversals and cycles.
+    """
+    faces = [_projected_face(drawable, projection) for drawable in drawables]
+    polygons = [face.polygon if face else Polygon() for face in faces]
+    tree = STRtree(polygons)
+    successors: list[set[int]] = [set() for _ in drawables]
+    indegree = [0] * len(drawables)
+
+    for face_index, face in enumerate(faces):
+        if face is None:
+            continue
+        for candidate in tree.query(face.polygon):
+            other_index = int(candidate)
+            if other_index <= face_index or faces[other_index] is None:
+                continue
+            other = faces[other_index]
+            overlap = face.polygon.intersection(other.polygon)
+            if overlap.is_empty or overlap.area < 1e-10:
+                continue
+            difference = (
+                other.plane[0] - face.plane[0],
+                other.plane[1] - face.plane[1],
+                other.plane[2] - face.plane[2],
+            )
+            minimum, maximum = _plane_extrema(overlap, difference)
+            if minimum >= -1e-7 and maximum > 1e-7:
+                far, near = face_index, other_index
+            elif maximum <= 1e-7 and minimum < -1e-7:
+                far, near = other_index, face_index
+            else:
+                continue
+            successors[far].add(near)
+            indegree[near] += 1
+
+    remaining = set(range(len(drawables)))
+    ready: list[tuple[float, int]] = []
+    for drawable_index, degree in enumerate(indegree):
+        if degree == 0:
+            heappush(ready, (drawables[drawable_index].depth, drawable_index))
+
+    ordered: list[_Drawable] = []
+    while remaining:
+        if ready:
+            _, drawable_index = heappop(ready)
+            if drawable_index not in remaining:
+                continue
+        else:
+            # Interlocking surfaces can form a painter-order cycle. Visibility
+            # clipping resolves it; break the cycle deterministically by mean depth.
+            drawable_index = min(remaining, key=lambda index: (drawables[index].depth, index))
+        remaining.remove(drawable_index)
+        ordered.append(drawables[drawable_index])
+        for successor in successors[drawable_index]:
+            indegree[successor] -= 1
+            if indegree[successor] == 0:
+                heappush(ready, (drawables[successor].depth, successor))
+
+    return ordered
+
+
 def _nearer_region(overlap, plane: tuple[float, float, float]):
     """Clip overlap to the half-plane where the occluder is in front.
 
@@ -283,10 +361,12 @@ def _nearer_region(overlap, plane: tuple[float, float, float]):
     corners = [(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax)]
 
     def distance(p):
-        return a * p[0] + b * p[1] + c - 1e-7
+        return a * p[0] + b * p[1] + c
 
+    # Use tolerance only to reject coplanar faces, not to shift the cut: shifting
+    # both cuts leaves a strip where both faces are visible and order matters.
     values = [distance(p) for p in corners]
-    if max(values) <= 0:
+    if max(values) <= 1e-7:
         return None
     if min(values) >= 0:
         return overlap
@@ -304,10 +384,10 @@ def _nearer_region(overlap, plane: tuple[float, float, float]):
 
 
 def _visible_regions(drawables: list[_Drawable], projection: _Projection) -> list:
-    """Exact planar visibility masks for opaque faces, kept as vector geometry.
+    """Exact planar visible regions for opaque faces, kept as vector geometry.
 
-    Wall decorations share their wall's mask. STRtree limits comparisons to overlapping
-    screen bounds. Courtyards are not filled by the clipping masks.
+    Wall decorations are intersected with their wall's visible region. STRtree limits
+    comparisons to overlapping screen bounds. Courtyards remain open.
     """
     faces = [_projected_face(d, projection) for d in drawables]
     polygons = [f.polygon if f else Polygon() for f in faces]
@@ -325,7 +405,11 @@ def _visible_regions(drawables: list[_Drawable], projection: _Projection) -> lis
             overlap = face.polygon.intersection(other.polygon)
             if overlap.is_empty or overlap.area < 1e-10:
                 continue
-            difference = tuple(x - y for x, y in zip(other.plane, face.plane))
+            difference = (
+                other.plane[0] - face.plane[0],
+                other.plane[1] - face.plane[1],
+                other.plane[2] - face.plane[2],
+            )
             nearer = _nearer_region(overlap, difference)
             if nearer is not None and not nearer.is_empty:
                 occluded.append(nearer)
@@ -350,6 +434,20 @@ def _clip_path_data(geometry, canvas) -> str:
                 + " Z"
             )
     return " ".join(commands)
+
+
+def _line_path_data(geometry, canvas) -> str:
+    """Encode visible original edge fragments without connecting separate parts."""
+    if isinstance(geometry, LineString):
+        points = [canvas(point) for point in geometry.coords]
+        if len(points) < 2:
+            return ""
+        return f"M {points[0][0]:.6f},{points[0][1]:.6f} " + " ".join(
+            f"L {x:.6f},{y:.6f}" for x, y in points[1:]
+        )
+    return " ".join(
+        data for part in getattr(geometry, "geoms", []) if (data := _line_path_data(part, canvas))
+    )
 
 
 def _all_projected_points(drawables: Iterable[_Drawable], projection: _Projection) -> list[Point2D]:
@@ -412,6 +510,8 @@ def save_svg(
 
     The returned SVG is a presentation asset, not a replacement for the OSM:
     simulation geometry continues to be generated by :func:`geogen.osm.build_model`.
+    Fills and original edges are clipped geometrically before writing SVG paths,
+    so occlusion does not depend on clipPath support or shared document IDs.
     """
     footprints = list(footprints)
     if not footprints:
@@ -466,40 +566,40 @@ def save_svg(
         },
     )
 
-    definitions = ET.SubElement(svg, f"{{{_SVG_NS}}}defs")
     scene = ET.SubElement(svg, f"{{{_SVG_NS}}}g", {"id": "scene"})
     visible_regions = _visible_regions(drawables, projection)
     for index, (drawable, visible) in enumerate(zip(drawables, visible_regions)):
         if visible.is_empty or visible.area < 1e-10:
             continue
-        identifier = f"visible-face-{index}"
-        clip = ET.SubElement(
-            definitions,
-            f"{{{_SVG_NS}}}clipPath",
-            {"id": identifier, "clipPathUnits": "userSpaceOnUse"},
-        )
-        ET.SubElement(
-            clip,
-            f"{{{_SVG_NS}}}path",
-            {
-                "d": _clip_path_data(visible, canvas),
-                "clip-rule": "evenodd",
-            },
-        )
-        group = ET.SubElement(scene, f"{{{_SVG_NS}}}g", {"clip-path": f"url(#{identifier})"})
+        group = ET.SubElement(scene, f"{{{_SVG_NS}}}g", {"id": f"face-{index}"})
         for primitive, points_3d, css_class in drawable.primitives:
-            projected = [canvas(projection.project(point)) for point in points_3d]
+            projected = [projection.project(point) for point in points_3d]
             if primitive == "polygon":
-                ET.SubElement(
-                    group,
-                    f"{{{_SVG_NS}}}polygon",
-                    {"class": css_class, "points": _points_attribute(projected)},
-                )
+                polygon = Polygon(projected)
+                fill = polygon.intersection(visible)
+                if not fill.is_empty and fill.area > 1e-10:
+                    ET.SubElement(
+                        group,
+                        f"{{{_SVG_NS}}}path",
+                        {
+                            "class": css_class,
+                            "d": _clip_path_data(fill, canvas),
+                            "fill-rule": "evenodd",
+                            "style": "stroke: none",
+                        },
+                    )
+                # Stroke only original edges. Stroking the clipped polygon would
+                # invent outlines along an occluder's boundary or a courtyard cut.
+                edges = polygon.boundary
             else:
+                edges = LineString(projected)
+            stroke = edges.intersection(visible)
+            data = _line_path_data(stroke, canvas)
+            if data:
                 ET.SubElement(
                     group,
-                    f"{{{_SVG_NS}}}polyline",
-                    {"class": css_class, "points": _points_attribute(projected)},
+                    f"{{{_SVG_NS}}}path",
+                    {"class": css_class, "d": data, "style": "fill: none"},
                 )
 
     destination = Path(path)

@@ -6,9 +6,13 @@ Generate geometry model in OpenStudio format from building open data (BDNB)
 postal addresses in the [BDNB](https://bdnb.io) (*Base de Données Nationale des
 Bâtiments*), downloads their footprint, height and storey count, and writes an
 OpenStudio model (`.osm`) containing the corresponding geometry. It can also produce an
-EnergyPlus IDF file (`.idf`) instead, by forward translating the OpenStudio model. An
-optional vector SVG preview can be generated from the same geometry for dashboards and
-report generation.
+EnergyPlus IDF file (`.idf`) instead, by forward translating the OpenStudio model.
+
+Optional derived outputs can also be generated:
+
+- a vector SVG preview of the building geometry, intended for dashboards and report generation;
+- a JSON metadata file describing the building(s), including footprint area, number of storeys,
+  height and related BDNB attributes.
 
 The envelope is completed with windows and with a sloped roof when the BDNB
 describes them, as an approximation. Nothing else is generated: no construction
@@ -19,7 +23,7 @@ or envelope properties, no usage, no occupancy and no HVAC.
 - Python 3.12
 - [Poetry](https://python-poetry.org/)
 
-Optionnally, a valid BDNB API key, obtained from the
+Optionally, a valid BDNB API key, obtained from the
 [BDNB API portal](https://api-portail.bdnb.io/catalog/api/f4905edc-db58-3a3b-a8e5-c5dfc6692ee5)
 
 The OpenStudio 3.11 SDK is installed as a Python dependency, no separate
@@ -33,16 +37,16 @@ poetry install
 
 ## Usage
 
-If you have a valid BDNB API key, set it in the environment variable `BDNB_API_KEY`. It's optional, without this
-you'll get a quota of 10000 requests per month.
+If you have a valid BDNB API key, set it in the environment variable `BDNB_API_KEY`.
+It is optional; without it, the BDNB API is queried anonymously and is rate limited.
 
 ```bash
 export BDNB_API_KEY=<your-api-key>
-poetry run geogen "1 rue de la Paix, Paris"
-# Wrote bdnb-bg-1234.osm with 1 building(s), 1 footprint(s), 3 space(s) and 6 window(s)
 
-# Generate the OSM and a report-ready SVG preview in the same run
-poetry run geogen "1 rue de la Paix, Paris" -o building.osm --svg-output building.svg
+poetry run geogen "1 rue de la Paix, Paris"
+
+# Example output:
+# Wrote bdnb-bg-1234.osm with 1 building(s), 1 footprint(s), 3 space(s) and 6 window(s)
 ```
 
 The model is named after the BDNB code of the building group (or of the building
@@ -53,8 +57,34 @@ Several addresses can be passed at once to generate a single model containing a
 group of buildings:
 
 ```bash
-poetry run geogen "1 rue de la Paix, Paris" "3 rue de la Paix, Paris" -o block.osm
+poetry run geogen \
+  "1 rue de la Paix, Paris" \
+  "3 rue de la Paix, Paris" \
+  -o block.osm
 ```
+
+### Generate OSM, SVG and JSON together
+
+The three outputs can be generated in a single run:
+
+```bash
+poetry run geogen \
+  "122 Rue Amelot, 75011 Paris, France" \
+  -o 122_rue_amelot.osm \
+  --svg-output 122_rue_amelot.svg \
+  --json-output 122_rue_amelot.json
+```
+
+This produces:
+
+```text
+122_rue_amelot.osm
+122_rue_amelot.svg
+122_rue_amelot.json
+```
+
+The `.osm` remains the OpenStudio model and the source of truth. The SVG and JSON
+files are derived outputs intended for visualization and reporting workflows.
 
 The API key can also be passed with `--api-key`. Run `geogen --help` for the
 full list of options:
@@ -64,11 +94,12 @@ full list of options:
 | `-o, --output`           | Path of the generated model file (default: the name of the building)    |
 | `-k, --api-key`          | BDNB API key, defaults to `$BDNB_API_KEY`                               |
 | `--name`                 | Name of the building of the model (default: its BDNB code)              |
-| `--svg-output`           | Optional path of a vector SVG 3D preview                                |
+| `--svg-output`           | Optional path of a vector SVG 3D-like preview                           |
 | `--svg-width`            | SVG canvas width (default `1200`)                                       |
 | `--svg-height`           | SVG canvas height (default `900`)                                       |
 | `--svg-azimuth`          | Orthographic camera azimuth (default `45` degrees)                      |
 | `--svg-elevation`        | Orthographic camera elevation (default `28` degrees)                    |
+| `--json-output`          | Optional path of a JSON file describing the downloaded building(s)      |
 | `--output-format`        | Format of the generated model, `osm` or `idf` (default `osm`)           |
 | `--storey-height`        | Storey height used when the BDNB data is incomplete (default `3.0` m)   |
 | `--simplify-tolerance`   | Footprint simplification tolerance in metres (default `0.1`)            |
@@ -80,22 +111,131 @@ full list of options:
 | `--timeout`              | Timeout of the API requests in seconds                                  |
 | `-v, --verbose`          | Print debug information                                                 |
 
-### SVG preview
+## SVG preview
 
 `--svg-output` generates a lightweight orthographic vector preview from the same
-BDNB-derived footprints used to create the OpenStudio model. The SVG is intended as a
-presentation/report asset; the `.osm` remains the authoritative simulation geometry.
-Walls, roofs, storey separators and windows are emitted with CSS classes (`wall`, `roof`,
-`window`, `storey-line`) so a downstream report generator can restyle them without
-regenerating the geometry.
+BDNB-derived footprints used to create the OpenStudio model.
+
+The SVG is intended as a presentation/report asset; it is **not an interactive 3D
+viewer**. The viewpoint is fixed at generation time through `--svg-azimuth` and
+`--svg-elevation`. A different view can be obtained by regenerating the SVG with
+different values.
+
+Because the output is vector-based, it can be resized without loss of quality.
+
+Walls, roofs, storey separators and windows are emitted with CSS classes such as:
+
+```text
+wall
+roof
+window
+storey-line
+```
+
+This allows a downstream report generator to restyle the SVG without regenerating
+the geometry.
 
 Example:
 
 ```bash
-poetry run geogen "122 Rue Amelot, 75011 Paris, France" \
+poetry run geogen \
+  "122 Rue Amelot, 75011 Paris, France" \
   -o 122_rue_amelot.osm \
   --svg-output 122_rue_amelot.svg
 ```
+
+The SVG export supports the same multi-building workflow as the OpenStudio model.
+When several BDNB building groups are generated together, a single SVG can represent
+the complete group/block in the same scene.
+
+## JSON building metadata
+
+`--json-output` exports a machine-readable description of the BDNB building group(s)
+already downloaded by `geogen`.
+
+No additional BDNB request is required for the main geometry metadata because
+`geogen` already retrieves the fields needed to build the model.
+
+The JSON can include, for each building group:
+
+- BDNB identifier;
+- address;
+- city;
+- footprint area;
+- number of storeys;
+- mean building height;
+- ground elevation;
+- estimated floor area;
+- fictitious geometry flag;
+- glazing ratio;
+- roof material;
+- roof type;
+- a short human-readable building description.
+
+Example:
+
+```bash
+poetry run geogen \
+  "122 Rue Amelot, 75011 Paris, France" \
+  -o 122_rue_amelot.osm \
+  --json-output 122_rue_amelot.json
+```
+
+Example JSON structure:
+
+```json
+{
+  "source_addresses": [
+    "122 Rue Amelot, 75011 Paris, France"
+  ],
+  "building_count": 1,
+  "total_footprint_area_m2": 420.0,
+  "total_estimated_floor_area_m2": 2100.0,
+  "buildings": [
+    {
+      "bdnb_id": "bdnb-bg-1234",
+      "address": "122 Rue Amelot",
+      "city": "Paris",
+      "footprint_area_m2": 420.0,
+      "number_of_storeys": 5,
+      "height_m": 15.2,
+      "ground_elevation_m": 48.7,
+      "estimated_floor_area_m2": 2100.0,
+      "fictitious_geometry": false,
+      "glazing_ratio": 25.0,
+      "roof_material": "tuile",
+      "roof_type": "combles",
+      "description": "5-storey building located at 122 Rue Amelot with footprint ≈ 420 m² and height ≈ 15.2 m."
+    }
+  ]
+}
+```
+
+### Surface terminology
+
+`footprint_area_m2` corresponds to the building-group footprint area provided by the
+BDNB (`s_geom_groupe`).
+
+`estimated_floor_area_m2` is a derived estimate:
+
+```text
+estimated floor area = footprint area × number of storeys
+```
+
+It should therefore be treated as an estimate, not as a certified total or gross floor
+area. The estimate assumes that the footprint is representative of every storey.
+
+### Multiple buildings
+
+When an address resolves to several BDNB building groups, or when several addresses are
+provided, the JSON contains:
+
+- `building_count`;
+- aggregated `total_footprint_area_m2`;
+- aggregated `total_estimated_floor_area_m2`;
+- one metadata object per building group in the `buildings` array.
+
+This makes the output suitable for both individual buildings and multi-building blocks.
 
 ## How it works
 
@@ -107,8 +247,9 @@ For each address, `geogen` calls the BDNB API (`https://api.bdnb.io/v1/bdnb`):
    (`batiment_groupe_id`) located at this address.
 1. `GET /donnees/batiment_groupe_complet` downloads the footprint
    (`geom_groupe`), the mean height (`hauteur_mean`), the storey count
-   (`nb_niveau`) and the ground altitude (`altitude_sol_mean`) of each group,
-   together with the envelope attributes described below.
+   (`nb_niveau`), the ground altitude (`altitude_sol_mean`) and the footprint area
+   (`s_geom_groupe`) of each group, together with the envelope attributes described
+   below.
 1. `GET /donnees/batiment_groupe_wall_dict` downloads the description of the
    exterior surfaces of the building, which gives the inclination of its roof
    faces. This table is only published by the complete BDNB; the roof material
@@ -173,11 +314,16 @@ so it is only asked once; the envelope attributes missing from
 `batiment_groupe_complet` are looked up in the table they come from
 (`batiment_groupe_dpe_representatif_logement`, `batiment_groupe_ffo_bat`).
 
-Known limitations: interior rings (courtyards) of the BDNB footprints are
-ignored, a building group whose geometry is flagged as fictitious in the BDNB
-(`contient_fictive_geom_groupe`) is reported but still modelled, sloped roofs
-are added on top of `hauteur_mean` and their apex is capped by
-`--max-roof-height`, which flattens the roofs of large footprints.
+Known limitations:
+
+- interior rings (courtyards) of the BDNB footprints are ignored;
+- a building group whose geometry is flagged as fictitious in the BDNB
+  (`contient_fictive_geom_groupe`) is reported but still modelled;
+- sloped roofs are added on top of `hauteur_mean` and their apex is capped by
+  `--max-roof-height`, which flattens the roofs of large footprints;
+- the SVG preview is a static vector projection, not an interactive 3D model;
+- `estimated_floor_area_m2` is a derived estimate and should not be interpreted as
+  a certified total floor area.
 
 ## Development
 

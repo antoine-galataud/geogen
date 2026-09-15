@@ -1,484 +1,232 @@
 # geogen
 
-Generate OpenStudio and EnergyPlus geometry from addresses in France and Great Britain.
+Generate OpenStudio and EnergyPlus building geometry from addresses in France and Great Britain.
 
-`geogen` is a command line tool that locates one or several buildings from their
-postal addresses using [BDNB](https://bdnb.io) in France or
-[OS Building Features](https://www.ordnancesurvey.co.uk/products/os-building-features)
-in Great Britain, downloads their footprint, height and storey count, and writes an
-OpenStudio model (`.osm`) containing the corresponding geometry. It can also produce an
-EnergyPlus IDF file (`.idf`) instead, by forward translating the OpenStudio model.
+`geogen` retrieves building footprints and attributes from:
 
-Optional derived outputs can also be generated:
+- [BDNB](https://bdnb.io) in France;
+- [Ordnance Survey Building Features](https://www.ordnancesurvey.co.uk/products/os-building-features) in England, Scotland, and Wales.
 
-- a vector SVG preview of the building geometry, intended for dashboards and report generation;
-- a JSON metadata file describing the building(s), including footprint area, number of storeys,
-  height and related BDNB attributes.
+It generates an OpenStudio model (`.osm`) or EnergyPlus IDF (`.idf`), with optional SVG previews and JSON metadata. Multiple addresses—including mixed French and British portfolios—can be combined in one model.
 
-The envelope is completed with windows and with a sloped roof when the provider
-describes them, as an approximation. Nothing else is generated: no construction
-or envelope properties, no usage, no occupancy and no HVAC.
+## Features
 
-## Requirements
+- Polygon and multipart building footprints, including courtyards
+- One space and thermal zone per storey and footprint part
+- Building elevations and matched adjoining surfaces
+- Approximate windows and pitched roofs when source data or fallback options allow
+- Static, orthographic SVG previews for reports and dashboards
+- Provider-aware JSON metadata for individual buildings and portfolios
+
+The generated model contains geometry and thermal zones only. It does not add constructions, schedules, loads, occupancy, HVAC, or other simulation inputs.
+
+## Requirements and installation
 
 - Python 3.12
 - [Poetry](https://python-poetry.org/)
 
-Optionally, a valid BDNB API key, obtained from the
-[BDNB API portal](https://api-portail.bdnb.io/catalog/api/f4905edc-db58-3a3b-a8e5-c5dfc6692ee5)
-
-The OpenStudio 3.11 SDK is installed as a Python dependency, no separate
-OpenStudio installation is needed.
-
-## Installation
+OpenStudio 3.11 is installed as a Python dependency.
 
 ```bash
 poetry install
 ```
 
-## Usage
+## Quick start
 
-If you have a valid BDNB API key, set it in the environment variable `BDNB_API_KEY`.
-It is optional; without it, the BDNB API is queried anonymously and is rate limited.
+### France: BDNB
 
-```bash
-export BDNB_API_KEY=<your-api-key>
-
-poetry run geogen "1 rue de la Paix, Paris"
-
-# Example output:
-# Wrote bdnb-bg-1234.osm with 1 building(s), 1 footprint(s), 3 space(s) and 6 window(s)
-```
-
-The model is named after the BDNB code of the building group (or of the building
-itself when it belongs to no group), and so is the generated file unless
-`--output` is given.
-
-Several addresses can be passed at once to generate a single model containing a
-group of buildings:
+A BDNB API key is optional. Anonymous requests may be rate-limited.
 
 ```bash
-poetry run geogen \
-  "1 rue de la Paix, Paris" \
-  "3 rue de la Paix, Paris" \
-  -o block.osm
+export BDNB_API_KEY="your-api-key"  # optional
+poetry run geogen "122 Rue Amelot, 75011 Paris, France"
 ```
 
-### Generate OSM, SVG and JSON together
+The key can also be supplied with `--api-key`.
 
-The three outputs can be generated in a single run:
+### Great Britain: Ordnance Survey
 
-```bash
-poetry run geogen \
-  "122 Rue Amelot, 75011 Paris, France" \
-  -o 122_rue_amelot.osm \
-  --svg-output 122_rue_amelot.svg \
-  --json-output 122_rue_amelot.json
-```
+Create an [OS Data Hub API project](https://docs.os.uk/os-apis/core-concepts/getting-started-with-an-api-project) with access to both:
 
-This produces:
-
-```text
-122_rue_amelot.osm
-122_rue_amelot.svg
-122_rue_amelot.json
-```
-
-The `.osm` remains the OpenStudio model and the source of truth. The SVG and JSON
-files are derived outputs intended for visualization and reporting workflows.
-
-The API key can also be passed with `--api-key`. Run `geogen --help` for the
-full list of options:
-
-| Option                   | Description                                                             |
-| ------------------------ | ----------------------------------------------------------------------- |
-| `-o, --output`           | Path of the generated model file (default: the name of the building)    |
-| `-k, --api-key`          | BDNB API key, defaults to `$BDNB_API_KEY`                               |
-| `--name`                 | Name of the building of the model (default: its BDNB code)              |
-| `--svg-output`           | Optional path of a vector SVG 3D-like preview                           |
-| `--svg-width`            | SVG canvas width (default `1200`)                                       |
-| `--svg-height`           | SVG canvas height (default `900`)                                       |
-| `--svg-azimuth`          | Orthographic camera azimuth (default `45` degrees)                      |
-| `--svg-elevation`        | Orthographic camera elevation (default `28` degrees)                    |
-| `--json-output`          | Optional path of a JSON file describing the downloaded building(s)      |
-| `--output-format`        | Format of the generated model, `osm` or `idf` (default `osm`)           |
-| `--storey-height`        | Storey height used when the BDNB data is incomplete (default `3.0` m)   |
-| `--simplify-tolerance`   | Footprint simplification tolerance in metres (default `0.1`)            |
-| `--window-to-wall-ratio` | Glazing estimate for the buildings unknown to the BDNB (no default)     |
-| `--roof-pitch`           | Pitch of the sloped roofs unknown to the BDNB (default `30` degrees)    |
-| `--max-roof-height`      | Maximum height of a sloped roof (default `6.0` m)                       |
-| `--max-buildings`        | Maximum number of building groups downloaded per address (default `10`) |
-| `--base-url`             | Base URL of the BDNB API, defaults to `$BDNB_BASE_URL`                  |
-| `--timeout`              | Timeout of the API requests in seconds                                  |
-| `-v, --verbose`          | Print debug information                                                 |
-
-### Great Britain: setup and examples
-
-Create an [OS Data Hub API project](https://docs.os.uk/os-apis/core-concepts/getting-started-with-an-api-project)
-with **both OS Places API and OS NGD API – Features** enabled, and access to
-OS Building Features (Building v4).
-
-#### How to register for an OS Data Hub API key
-
-1. Sign in or create an account at [OS Data Hub](https://osdatahub.os.uk/).
-1. Create a new project in the [API Projects](https://osdatahub.os.uk/projects) section.
-1. Enable the following APIs for your project:
-   - OS Places API: a free trial is available for testing, without a credit card.
-   - OS NGD API - Features
-1. Copy the generated API key for your project.
-
-Note: OS APIs don't have fenestration info.
-
-Set its key:
+- OS Places API;
+- OS NGD API – Features, using Building Features collection `bld-fts-building-4`.
 
 ```bash
 export OS_API_KEY="your-project-key"
-export ADDRESS="PRIME MINISTER & FIRST LORD OF THE TREASURY, 10, DOWNING STREET, LONDON, SW1A 2AA"
-poetry run geogen "$ADDRESS" -o london.osm
-poetry run geogen "$ADDRESS" \
-  --output-format idf -o london.idf --svg-output london.svg \
-  --window-to-wall-ratio 0.2
+poetry run geogen \
+  "10 Downing Street, London, SW1A 2AA, UK" \
+  -o london.osm
 ```
 
-OS access is authenticated and subject to your OS plan, entitlements and licence;
-it is not the anonymous French open-data service. Consult the OS Data Hub for
-current terms and retain any attribution required when using or distributing
-models and previews derived from OS data. A single key is used for both APIs.
-The existing `--api-key` / `BDNB_API_KEY` still applies only to France.
+OS access is subject to Data Hub entitlements, quotas, licensing, and attribution requirements. Coverage is limited to England, Scotland, and Wales; Northern Ireland and Crown Dependencies are not supported.
 
-**Coverage:** `UK` is the CLI country code, but the geometry service covers only
-**England, Scotland and Wales**. Northern Ireland and the Crown Dependencies
-are unsupported, even though OS Places can return their addresses.
+## Outputs
 
-### Country discovery
+### OpenStudio and EnergyPlus
 
-Country routing performs **zero API calls**. An explicit country suffix (France,
-FR, UK, GB, United Kingdom, Great Britain, England, Scotland or Wales) or a full
-postcode selects the provider. French five-digit and British alphanumeric
-postcodes are recognized, including British postcodes without a space. In the
-absence of those hints, French street words such as `rue`, `chemin`, `impasse`
-and `allée` preserve the existing French workflow.
-
-This is a two-country classifier, not a worldwide geocoder: a five-digit code
-is treated as French within that scope. Use complete addresses. Contradictory
-country/postcode hints and ambiguous inputs fail with a useful error before
-any requests. For an address such as `10 High Street, Oxford`, either append
-`UK` or pass `--country UK`. `--country FR|UK|GB` overrides discovery for every
-address in that invocation; unsupported coverage is still rejected.
-
-Each address is routed independently in automatic mode. Both providers share
-the same generation options. Mixed FR/UK inputs are transformed into one
-Lambert-93 coordinate frame; pure UK inputs use British National Grid. A model
-has only one site and weather location, so distant buildings should normally
-be generated in separate invocations. Ground elevations use each provider's
-native vertical datum; no cross-country vertical-datum conversion is performed.
-
-| Additional option          | Description                                                                                             |
-| -------------------------- | ------------------------------------------------------------------------------------------------------- |
-| \`--country auto           | FR                                                                                                      |
-| `--os-api-key`             | OS key, defaults to `OS_API_KEY`                                                                        |
-| `--os-building-collection` | `bld-fts-building-4`, also configurable as `OS_BUILDING_COLLECTION`; other schema versions are rejected |
-
-## SVG preview
-
-`--svg-output` generates a lightweight orthographic vector preview from the same
-BDNB-derived footprints used to create the OpenStudio model.
-
-The SVG is intended as a presentation/report asset; it is **not an interactive 3D
-viewer**. The viewpoint is fixed at generation time through `--svg-azimuth` and
-`--svg-elevation`. A different view can be obtained by regenerating the SVG with
-different values.
-
-Because the output is vector-based, it can be resized without loss of quality.
-
-Walls, roofs, storey separators and windows are emitted with CSS classes such as:
-
-```text
-wall
-roof
-window
-storey-line
-```
-
-This allows a downstream report generator to restyle the SVG without regenerating
-the geometry.
-
-Example:
+OpenStudio (`osm`) is the default output format. Use `--output-format idf` to forward-translate the generated model to EnergyPlus IDF.
 
 ```bash
 poetry run geogen \
   "122 Rue Amelot, 75011 Paris, France" \
-  -o 122_rue_amelot.osm \
-  --svg-output 122_rue_amelot.svg
+  --output-format idf \
+  -o building.idf
 ```
 
-The SVG export supports the same multi-building workflow as the OpenStudio model.
-When several BDNB building groups are generated together, a single SVG can represent
-the complete group/block in the same scene.
+Without `--output`, the filename is derived from the provider building identifier and selected format.
 
-## JSON building metadata
+### SVG preview
 
-`--json-output` exports a machine-readable description of the buildings already
-downloaded by `geogen`, from BDNB, Ordnance Survey, or a mixed-provider portfolio.
-
-No additional provider request is required for the main geometry metadata because
-`geogen` already retrieves the fields needed to build the model.
-
-The JSON can include, for each building:
-
-- common `building_id`, `provider`, `country`, and source `crs`;
-- `bdnb_id` for BDNB buildings or unprefixed `os_id` for Ordnance Survey buildings;
-- address;
-- city;
-- footprint area;
-- number of storeys;
-- mean building height;
-- ground elevation;
-- estimated floor area;
-- fictitious geometry flag;
-- glazing ratio;
-- roof material;
-- roof type;
-- roof shape, when supplied by the provider;
-- a short human-readable building description.
-
-Provider identity comes from the source model, not the country or identifier prefix.
-OS records use `provider: "ordnance_survey"`, `country: "UK"`, and
-`crs: "EPSG:27700"`; they never contain `bdnb_id`. For example, an OS identifier
-`building-1` produces `building_id: "os-building-1"` and `os_id: "building-1"`.
-UK descriptions retain the full address. Generic `Building` records have a null
-provider unless a provider-specific subclass declares one.
-
-Unknown measurements remain `null`: metadata does not substitute the height,
-storey count, or envelope defaults used to generate geometry. Aggregates sum known
-measurements and are `null` if none are known. Glazing ratios retain the source
-units (for example, a BDNB percentage is not converted into a fraction).
-
-Example:
+`--svg-output` writes a scalable, orthographic preview from the same processed footprints used by the model. It supports multiple buildings, courtyards, elevations, storey lines, roofs, and approximate windows.
 
 ```bash
 poetry run geogen \
   "122 Rue Amelot, 75011 Paris, France" \
-  -o 122_rue_amelot.osm \
-  --json-output 122_rue_amelot.json
+  -o building.osm \
+  --svg-output building.svg
 ```
 
-Example JSON structure:
+The view can be adjusted with `--svg-width`, `--svg-height`, `--svg-azimuth`, and `--svg-elevation`. The SVG is a static presentation asset, not an interactive viewer or simulation-authoritative geometry.
+
+### JSON metadata
+
+`--json-output` writes UTF-8 portfolio metadata without making another provider request.
+
+```bash
+poetry run geogen \
+  "122 Rue Amelot, 75011 Paris, France" \
+  -o building.osm \
+  --json-output building.json
+```
+
+The JSON includes source addresses, building count, aggregate footprint and estimated floor areas, and one object per building. Building fields include:
+
+- provider, country, CRS, and provider identifier (`bdnb_id` or `os_id`);
+- address and city;
+- footprint area, storeys, height, elevation, and estimated floor area;
+- glazing and roof attributes when available;
+- fictitious-geometry status and a short description.
+
+Example:
 
 ```json
 {
   "source_addresses": [
-    "122 Rue Amelot, 75011 Paris, France"
+    "122 Rue Amelot, 75011 Paris, France",
+    "120 Rue Amelot, 75011 Paris, France"
   ],
-  "building_count": 1,
-  "total_footprint_area_m2": 420.0,
-  "total_estimated_floor_area_m2": 2100.0,
+  "building_count": 2,
+  "total_footprint_area_m2": 614.0,
+  "total_estimated_floor_area_m2": 3070.0,
   "buildings": [
     {
-      "building_id": "bdnb-bg-1234",
+      "building_id": "bdnb-bg-4K9H-BPAU-3CHX",
       "provider": "bdnb",
       "country": "FR",
       "crs": "EPSG:2154",
-      "bdnb_id": "bdnb-bg-1234",
-      "address": "122 Rue Amelot",
-      "city": "Paris",
-      "footprint_area_m2": 420.0,
+      "address": "122 Rue Amelot 75011 Paris 11e Arrondissement",
+      "city": "Paris 11e Arrondissement",
+      "footprint_area_m2": 115.0,
       "number_of_storeys": 5,
-      "height_m": 15.2,
-      "ground_elevation_m": 48.7,
-      "estimated_floor_area_m2": 2100.0,
+      "height_m": 13.0,
+      "ground_elevation_m": 35.0,
+      "estimated_floor_area_m2": 575.0,
       "fictitious_geometry": false,
-      "glazing_ratio": 25.0,
-      "roof_material": "tuile",
-      "roof_type": "combles",
-      "description": "5-storey building located at 122 Rue Amelot with footprint ≈ 420 m² and height ≈ 15.2 m."
+      "glazing_ratio": 0.31,
+      "roof_material": "ZINC ALUMINIUM",
+      "roof_type": null,
+      "roof_shape": null,
+      "bdnb_id": "bdnb-bg-4K9H-BPAU-3CHX",
+      "description": "5-storey building located at 122 Rue Amelot, in Paris 11e Arrondissement, with an approximate footprint of 115 m², an estimated floor area of 575 m², and a height of 13.0 m."
+    },
+    {
+      "building_id": "bdnb-bg-8R6K-ZAC9-EFXR",
+      "provider": "bdnb",
+      "country": "FR",
+      "crs": "EPSG:2154",
+      "address": "5 Rue de Crussol 75011 Paris 11e Arrondissement",
+      "city": "Paris 11e Arrondissement",
+      "footprint_area_m2": 499.0,
+      "number_of_storeys": 5,
+      "height_m": 13.0,
+      "ground_elevation_m": 35.0,
+      "estimated_floor_area_m2": 2495.0,
+      "fictitious_geometry": false,
+      "glazing_ratio": 0.24,
+      "roof_material": "ZINC ALUMINIUM",
+      "roof_type": "inconnu",
+      "roof_shape": null,
+      "bdnb_id": "bdnb-bg-8R6K-ZAC9-EFXR",
+      "description": "5-storey building located at 5 Rue de Crussol, in Paris 11e Arrondissement, with an approximate footprint of 499 m², an estimated floor area of 2495 m², and a height of 13.0 m."
     }
   ]
 }
 ```
 
-### Surface terminology
+Unknown source measurements remain `null`; geometry-generation defaults are not substituted into metadata. Estimated floor area is `footprint area × storey count` and is not a certified floor-area measurement.
 
-`footprint_area_m2` corresponds to the source footprint area: BDNB
-`s_geom_groupe` or OS `geometry_area_m2`.
+### Generate all outputs together
 
-`estimated_floor_area_m2` is a derived estimate:
-
-```text
-estimated floor area = footprint area × number of storeys
+```bash
+poetry run geogen \
+  "122 Rue Amelot, 75011 Paris, France" \
+  -o building.osm \
+  --svg-output building.svg \
+  --json-output building.json
 ```
 
-It should therefore be treated as an estimate, not as a certified total or gross floor
-area. The estimate assumes that the footprint is representative of every storey.
+## Multiple addresses and country routing
 
-### Multiple buildings
+Pass multiple addresses to create one model:
 
-When an address resolves to several buildings, or when several addresses are
-provided, the JSON contains:
+```bash
+poetry run geogen \
+  "120 Rue Amelot, 75011 Paris, France" \
+  "122 Rue Amelot, 75011 Paris, France" \
+  -o portfolio.osm \
+  --svg-output portfolio.svg \
+  --json-output portfolio.json
+```
 
-- `building_count`;
-- aggregated `total_footprint_area_m2`;
-- aggregated `total_estimated_floor_area_m2`;
-- one metadata object per source building in the `buildings` array, including mixed providers.
+In the default `--country auto` mode, each address is routed independently using its country suffix or postcode. Use complete addresses, or override routing for the entire command with `--country FR`, `--country UK`, or `--country GB`.
 
-This makes the output suitable for both individual buildings and multi-building blocks.
+Pure British portfolios use British National Grid (EPSG:27700). French and mixed portfolios use Lambert-93 (EPSG:2154). Because a model has one site/weather location and provider elevations use different vertical datums, geographically distant or mixed-country buildings should generally be generated separately.
 
-## How it works
+## Main options
 
-`models.py` defines the common `Building` dataclass and `BuildingProvider`
-protocol. `BuildingGroup(Building)` adds BDNB group/construction identifiers;
-`OsBuilding(Building)` adds the native OS identifier. Shared geometry, height,
-address, and envelope fields are defined only once. These frozen records accept
-their identifier positionally and common attributes by keyword, and support
-`dataclasses.replace()`. The BDNB `Address` record also lives in `models.py`.
+| Option                         | Description                                                       |
+| ------------------------------ | ----------------------------------------------------------------- |
+| `-k, --api-key TEXT`           | BDNB key; defaults to `$BDNB_API_KEY`                             |
+| `--os-api-key TEXT`            | OS Data Hub key; defaults to `$OS_API_KEY`                        |
+| `-o, --output PATH`            | Model output path; defaults to the provider-derived name          |
+| `--output-format osm\|idf`     | Model format (default: `osm`)                                     |
+| `--name TEXT`                  | Override the model name                                           |
+| `--svg-output PATH`            | Write an SVG preview                                              |
+| `--svg-width INTEGER`          | SVG canvas width (default `1200`)                                 |
+| `--svg-height INTEGER`         | SVG canvas height (default `900`)                                 |
+| `--svg-azimuth INTEGER`        | Orthographic camera azimuth (default `45` degrees)                |
+| `--svg-elevation INTEGER`      | Orthographic camera elevation (default `28` degrees)              |
+| `--json-output PATH`           | Write building and portfolio metadata                             |
+| `--country auto\|FR\|UK\|GB`   | Select or automatically discover the provider                     |
+| `--storey-height FLOAT`        | Fallback floor-to-floor height (default: `3.0` m)                 |
+| `--window-to-wall-ratio FLOAT` | Fallback glazing ratio as a fraction (`0.2`) or percentage (`20`) |
+| `--roof-pitch FLOAT`           | Fallback pitch for roofs inferred as pitched (default: `30°`)     |
+| `--max-roof-height FLOAT`      | Cap generated pitched-roof height (default: `6.0` m)              |
+| `--simplify-tolerance FLOAT`   | Footprint simplification tolerance (default: `0.1` m)             |
+| `--max-buildings INTEGER`      | Maximum matched buildings per address (default: `10`)             |
+| `--timeout FLOAT`              | Provider request timeout (default: `30` seconds)                  |
+| `-v, --verbose`                | Enable debug logging                                              |
 
-`providers.py` handles country routing and resolves the BDNB CRS without discarding
-provider-specific fields. `ordnance_survey.py` implements the independent OS provider. Shared
-`geometry.py`, `envelope.py`, `osm.py` and `svg.py` implement all generation.
-The existing `geogen.bdnb.BdnbClient`, `Address`, `BuildingGroup`, and
-`BuildingGroup.from_row()` entry points remain available; provider row parsing
-stays in `bdnb.py`.
+Run `poetry run geogen --help` for all options, including SVG camera settings and BDNB/OS endpoint configuration.
 
-`metadata.py` exposes `building_metadata()` and `building_description()` for any
-`Building`, plus `portfolio_metadata()` for iterables or mappings of buildings.
-The legacy `building_group_metadata()` and `building_group_description()` names
-remain compatibility wrappers, including the existing BDNB metric fields.
+## Provider and geometry notes
 
-### UK retrieval and attribute mapping
-
-1. `GET https://api.os.uk/search/places/v1/find` requests up to two DPA address
-   candidates in EPSG:27700. The best match must score at least 0.8 and lead a
-   different UPRN by at least 0.05; otherwise supply a more precise address.
-1. `GET https://api.os.uk/features/ngd/ofa/v1/collections/bld-fts-building-4/items`
-   requests footprints within a 2 m square around the address point, explicitly
-   setting `bbox-crs` and output `crs` to EPSG:27700. Local point-in-polygon
-   matching excludes neighbouring footprints returned by the bounding box.
-   Pagination is followed when present, with pages capped at 100 features.
-1. A normal address needs **two requests**. The v4 collection is pinned, avoiding
-   discovery calls. Repeated normalized addresses and repeated UPRNs reuse
-   in-memory results. Buildings are deduplicated by provider and identifier.
-   `--max-buildings` caps the unique matched buildings returned per address.
-
-| OS Building v4 field           | Generated model                                                        |
-| ------------------------------ | ---------------------------------------------------------------------- |
-| `osid` (or GeoJSON `id`)       | Stable model/space identifier, prefixed `os-`                          |
-| GeoJSON geometry               | Polygon/MultiPolygon footprints in EPSG:27700                          |
-| `height_relativeroofbase_m`    | Wall extrusion height in metres                                        |
-| `height_relativemax_m`         | Fallback height; keeps the roof flat to avoid counting it twice        |
-| `numberoffloors`               | Storeys above ground; missing values use shared height/storey defaults |
-| `height_absolutemin_m`         | Ground elevation in metres                                             |
-| `geometry_area_m2`             | Source footprint area metadata                                         |
-| `roofshapeaspect_shape`        | Flat/pitched envelope hint; takes precedence over material             |
-| `roofmaterial_primarymaterial` | Roof material hint when roof shape is unknown                          |
-
-UK window locations and glazing ratios are not supplied by this integration.
-Use `--window-to-wall-ratio` for estimated windows, or omit it for blind walls.
-Pitched roofs use the shared approximate hip-roof algorithm and `--roof-pitch`
-/ `--max-roof-height`; actual roof faces, roof aspect, building parts with
-varying heights and basements are not reconstructed. Unknown and non-finite
-numeric attributes fall back to the shared defaults.
-
-Address matching is intentionally conservative: an address point outside the
-building (for example in a courtyard or at a site entrance) produces a warning,
-not a nearest-neighbour guess. This spatial lookup does not enumerate every
-building on a campus associated with one postal address. Supply individual
-building addresses for those cases. Weak/ambiguous address matches, missing
-credentials, HTTP errors and malformed responses are distinguished from no
-building found. Authentication/quota errors abort the run rather than switching
-countries. As with France, unmatched addresses warn and the remaining buildings
-can still be exported; no usable buildings means failure.
-
-API references: [Places Find](https://docs.os.uk/os-apis/accessing-os-apis/os-places-api/technical-specification/find),
-[NGD Features](https://docs.os.uk/os-apis/accessing-os-apis/os-ngd-api-features),
-[Building schema](https://docs.os.uk/osngd/data-structure/buildings/building-features/building).
-
-### France retrieval
-
-For each address, `geogen` calls the BDNB API (`https://api.bdnb.io/v1/bdnb`):
-
-1. `GET /geocodage` resolves the address to a BAN interoperability key
-   (`cle_interop_adr`). The `donnees/adresse` table is used as a fallback.
-1. `GET /donnees/rel_batiment_groupe_adresse` lists the building groups
-   (`batiment_groupe_id`) located at this address.
-1. `GET /donnees/batiment_groupe_complet` downloads the footprint
-   (`geom_groupe`), the mean height (`hauteur_mean`), the storey count
-   (`nb_niveau`), the ground altitude (`altitude_sol_mean`) and the footprint area
-   (`s_geom_groupe`) of each group, together with the envelope attributes described
-   below.
-1. `GET /donnees/batiment_groupe_wall_dict` downloads the description of the
-   exterior surfaces of the building, which gives the inclination of its roof
-   faces. This table is only published by the complete BDNB; the roof material
-   is used instead when it is missing.
-1. `GET /donnees/batiment_groupe_dpe_representatif_logement` and
-   `GET /donnees/batiment_groupe_ffo_bat` complete the envelope attributes that
-   `batiment_groupe_complet` does not publish. They are only called for the
-   buildings that need them.
-
-The footprints are then extruded into an OpenStudio model:
-
-- BDNB geometries are expressed in Lambert-93 (EPSG:2154), whose unit is the
-  metre; they are simply translated so that the centre of the modelled area
-  becomes the origin of the model, which is also used to set the latitude and
-  longitude of the site.
-- Every building group is extruded into one `Space` per storey, each space being
-  assigned to its own `BuildingStory`. The storey height is `hauteur_mean` /
-  `nb_niveau`; missing values are replaced by `--storey-height`.
-- Buildings are placed at their own ground altitude, relative to the lowest
-  building of the model, which defines the site elevation; buildings whose
-  altitude is unknown sit at that reference elevation.
-- Surfaces are intersected and matched, so that adjacent storeys and adjoining
-  buildings share interior surfaces.
-- The building of the model, its storeys and its spaces are named after the BDNB
-  code of the building group (`batiment_groupe_id`), so that the model can be
-  traced back to the database. A model holding several groups is named after the
-  first one, and the generated file takes the name of the building.
-
-### Envelope
-
-The BDNB does not publish the geometry of the windows nor the shape of the
-roofs, so both are approximated from its attributes. **When the information is
-missing, the envelope is left as is**: a building without glazing data gets no
-window, and a building without roof data keeps the flat roof of its top storey.
-`--window-to-wall-ratio` gives an estimate to use for the buildings whose
-fenestration the BDNB does not describe.
-
-- **Fenestration**: the share of the exterior walls covered by windows is
-  `pourcentage_surface_baie_vitree_exterieur`, or the ratio between the glazed
-  and exterior wall areas of the representative dwelling (`surface_vitree_nord`
-  and friends, over `surface_mur_exterieur`). It is applied to every exterior
-  wall left after the surface matching, so party walls stay blind. Only the
-  walls facing a glazed orientation are glazed, taken from
-  `l_orientation_baie_vitree` or from the facades whose glazed area is not zero.
-  When the BDNB knows neither of these shares, the ratio given with
-  `--window-to-wall-ratio` is used instead, as a fraction (`0.2`) or as a
-  percentage (`20`); without it the building keeps its blind walls.
-- **Roof shape**: the pitch of the roof is the mean inclination of the roof
-  faces of `wall_dict`, weighted by their area. When that description is not
-  available, the roof material (`materiaux_toiture_simplifie`, `mat_toit_txt`)
-  and the construction of the upper floor (`type_plancher_haut_deperditif`) are
-  used instead: a roof that can only be sloped (tiles, slate, zinc, attic...)
-  gives a roof of `--roof-pitch` degrees, while a flat one (concrete, bitumen,
-  terrace roof...) keeps the roof flat. A sloped roof is modelled as an attic
-  space above the top storey. OpenStudio’s hip-roof generator constructs ridges
-  and sloped faces from the footprint, replacing the former single-apex pyramid.
-
-The BDNB is published in several editions, and the open one serves fewer tables
-and fewer columns than the complete data model. A column or a table the API
-rejects is dropped from the request, which is retried, and geogen remembers it
-so it is only asked once; the envelope attributes missing from
-`batiment_groupe_complet` are looked up in the table they come from
-(`batiment_groupe_dpe_representatif_logement`, `batiment_groupe_ffo_bat`).
-
-Known limitations:
-
-- interior rings (courtyards) of the BDNB footprints are ignored;
-- a building group whose geometry is flagged as fictitious in the BDNB
-  (`contient_fictive_geom_groupe`) is reported but still modelled;
-- sloped roofs are added on top of `hauteur_mean` and their apex is capped by
-  `--max-roof-height`, which flattens the roofs of large footprints;
-- the SVG preview is a static vector projection, not an interactive 3D model;
-- `estimated_floor_area_m2` is a derived estimate and should not be interpreted as
-  a certified total floor area.
+- **BDNB:** accepts anonymous or authenticated requests and supplements building records with available envelope data. Geometry flagged as fictitious is warned about but still modeled.
+- **Ordnance Survey:** requires one API key with Places and NGD Features access. The address point must fall inside a returned building footprint; there is no nearest-building fallback. OS data does not provide fenestration through this integration, so use `--window-to-wall-ratio` to add estimated windows.
+- Missing height or storey data is inferred using `--storey-height`.
+- Provider glazing data takes precedence over `--window-to-wall-ratio`; otherwise walls remain unglazed when no fallback is supplied.
+- Roofs and windows are approximations. Actual roof faces, varying-height parts, basements, and detailed window geometry are not reconstructed.
+- Very small or unusable footprint parts may be repaired or skipped. A run fails if no usable geometry remains.
 
 ## Development
 

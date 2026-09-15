@@ -7,7 +7,7 @@ Generate OpenStudio and EnergyPlus building geometry from addresses in France an
 - [BDNB](https://bdnb.io) in France;
 - [Ordnance Survey Building Features](https://www.ordnancesurvey.co.uk/products/os-building-features) in England, Scotland, and Wales.
 
-It generates an OpenStudio model (`.osm`) or EnergyPlus IDF (`.idf`), with optional SVG previews and JSON metadata. Multiple addresses—including mixed French and British portfolios—can be combined in one model.
+It generates an OpenStudio model (`.osm`) or EnergyPlus IDF (`.idf`), with optional SVG previews and JSON metadata. Multiple addresses, including mixed French and British portfolios, can be combined in one model.
 
 ## Features
 
@@ -51,6 +51,8 @@ Create an [OS Data Hub API project](https://docs.os.uk/os-apis/core-concepts/get
 - OS Places API;
 - OS NGD API – Features, using Building Features collection `bld-fts-building-4`.
 
+OS APIs don't have fenestration info.
+
 ```bash
 export OS_API_KEY="your-project-key"
 poetry run geogen \
@@ -59,6 +61,15 @@ poetry run geogen \
 ```
 
 OS access is subject to Data Hub entitlements, quotas, licensing, and attribution requirements. Coverage is limited to England, Scotland, and Wales; Northern Ireland and Crown Dependencies are not supported.
+
+#### How to register for a free OS Data Hub API key
+
+1. Sign in or create an account at [OS Data Hub](https://osdatahub.os.uk/).
+1. Create a new project in the [API Projects](https://osdatahub.os.uk/projects) section.
+1. Enable the following APIs for your project:
+   1. OS Places API: a free trial is available for testing (credit card info filling can be skipped).
+   1. OS NGD API - Features
+1. Copy the generated API key for your project.
 
 ## Outputs
 

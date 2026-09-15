@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol
 
+NOT_PROVIDED = "not provided"
+
 
 class ProviderError(RuntimeError):
     """A provider request or address resolution failed."""
@@ -18,7 +20,8 @@ class AddressNotFoundError(ProviderError):
 class Building:
     """Normalized building; geometry coordinates use the explicitly declared CRS.
 
-    Heights and elevations are metres. Unknown envelope attributes remain None.
+    Heights and elevations are metres. Unknown measurements remain None. Envelope
+    classifications unavailable from a provider use ``NOT_PROVIDED``; explicit nulls remain None.
     """
 
     code: str = field(kw_only=False)
@@ -46,6 +49,14 @@ class Building:
     roof_material: str | None = None
     #: Construction principle of the upper floor, which hints at the roof shape.
     roof_type: str | None = None
+    #: Provider classification of exterior-wall insulation.
+    wall_insulation: str | None = NOT_PROVIDED
+    #: Provider classification of upper-floor, attic, or roof insulation.
+    upper_floor_insulation: str | None = NOT_PROVIDED
+    #: Provider classification of lowest-floor insulation.
+    lower_floor_insulation: str | None = NOT_PROVIDED
+    #: Provider classification of window glazing (for example single, double, or triple).
+    glazing_type: str | None = NOT_PROVIDED
     #: Exterior walls of the building group, as described by ``wall_dict``.
     walls: tuple[Any, ...] = ()
 

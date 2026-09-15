@@ -115,7 +115,7 @@ The JSON includes source addresses, building count, aggregate footprint and esti
 - provider, country, CRS, and provider identifier (`bdnb_id` or `os_id`);
 - address and city;
 - footprint area, storeys, height, elevation, and estimated floor area;
-- glazing and roof attributes when available;
+- glazing, wall insulation, upper- and lower-floor insulation, and roof attributes;
 - fictitious-geometry status and a short description.
 
 Example:
@@ -144,6 +144,10 @@ Example:
       "estimated_floor_area_m2": 575.0,
       "fictitious_geometry": false,
       "glazing_ratio": 0.31,
+      "glazing_type": "double vitrage",
+      "wall_insulation": "ITI",
+      "upper_floor_insulation": "isolé",
+      "lower_floor_insulation": null,
       "roof_material": "ZINC ALUMINIUM",
       "roof_type": null,
       "roof_shape": null,
@@ -164,6 +168,10 @@ Example:
       "estimated_floor_area_m2": 2495.0,
       "fictitious_geometry": false,
       "glazing_ratio": 0.24,
+      "glazing_type": "not provided",
+      "wall_insulation": null,
+      "upper_floor_insulation": "non isolé",
+      "lower_floor_insulation": "not provided",
       "roof_material": "ZINC ALUMINIUM",
       "roof_type": "inconnu",
       "roof_shape": null,
@@ -174,7 +182,7 @@ Example:
 }
 ```
 
-Unknown source measurements remain `null`; geometry-generation defaults are not substituted into metadata. Estimated floor area is `footprint area × storey count` and is not a certified floor-area measurement.
+For insulation and glazing classifications, a field unavailable from the building data provider is `"not provided"`, while an explicit provider `null` remains `null`. Other unknown source measurements remain `null`; geometry-generation defaults are not substituted into metadata. Estimated floor area is `footprint area × storey count` and is not a certified floor-area measurement.
 
 ### Generate all outputs together
 

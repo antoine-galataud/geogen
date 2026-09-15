@@ -28,6 +28,10 @@ def test_building_group_metadata():
         glazed_ratio=25.0,
         roof_material="tuile",
         roof_type="combles",
+        wall_insulation="isolation extérieure",
+        upper_floor_insulation="isolé",
+        lower_floor_insulation="non isolé",
+        glazing_type="double vitrage",
     )
 
     data = building_group_metadata(group)
@@ -39,6 +43,10 @@ def test_building_group_metadata():
     assert data["estimated_floor_area_m2"] == 2100.0
     assert data["address"] == "122 Rue Amelot"
     assert data["city"] == "Paris"
+    assert data["wall_insulation"] == "isolation extérieure"
+    assert data["upper_floor_insulation"] == "isolé"
+    assert data["lower_floor_insulation"] == "non isolé"
+    assert data["glazing_type"] == "double vitrage"
 
 
 def test_building_group_description():
@@ -125,6 +133,10 @@ def test_mixed_provider_metadata_and_json(tmp_path):
     assert uk["os_id"] == "same-id"
     assert uk["roof_shape"] == "flat"
     assert uk["glazing_ratio"] is None
+    assert uk["wall_insulation"] == "not provided"
+    assert uk["upper_floor_insulation"] == "not provided"
+    assert uk["lower_floor_insulation"] == "not provided"
+    assert uk["glazing_type"] == "not provided"
     assert "bdnb_id" not in uk
     assert british.address in uk["description"]
     assert "75011" not in fr["description"]
@@ -134,6 +146,25 @@ def test_mixed_provider_metadata_and_json(tmp_path):
     path = save_metadata_json(data, tmp_path / "nested" / "metadata.json")
     assert json.loads(path.read_text(encoding="utf-8")) == data
     assert "m²" in path.read_text(encoding="utf-8")
+
+
+def test_explicit_null_envelope_classifications_remain_null_in_json(tmp_path):
+    building = BuildingGroup(
+        "nulls",
+        wall_insulation=None,
+        upper_floor_insulation=None,
+        lower_floor_insulation=None,
+        glazing_type=None,
+    )
+    data = portfolio_metadata([building])
+
+    path = save_metadata_json(data, tmp_path / "metadata.json")
+    record = json.loads(path.read_text(encoding="utf-8"))["buildings"][0]
+
+    assert record["wall_insulation"] is None
+    assert record["upper_floor_insulation"] is None
+    assert record["lower_floor_insulation"] is None
+    assert record["glazing_type"] is None
 
 
 @pytest.mark.parametrize("country", ["FR", "UK", "US"])

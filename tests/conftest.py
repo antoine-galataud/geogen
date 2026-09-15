@@ -44,6 +44,10 @@ def building_row(geom_groupe: dict) -> dict:
         "materiaux_toiture_simplifie": "tuiles",
         "mat_toit_txt": "Tuiles",
         "type_plancher_haut_deperditif": "Combles perdus",
+        "type_isolation_mur_exterieur": "ITI",
+        "type_isolation_plancher_haut": "isolé",
+        "type_isolation_plancher_bas": "non isolé",
+        "type_vitrage": "double vitrage",
     }
 
 
@@ -56,6 +60,10 @@ def dpe_row() -> dict:
         "surface_vitree_est": 0.0,
         "surface_vitree_sud": 20.0,
         "surface_vitree_ouest": None,
+        "type_isolation_mur_exterieur": "ITI",
+        "type_isolation_plancher_haut": "isolé",
+        "type_isolation_plancher_bas": "non isolé",
+        "type_vitrage": "double vitrage",
     }
 
 

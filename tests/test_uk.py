@@ -225,6 +225,10 @@ def test_uk_cli_all_exports(tmp_path, output_format):
     assert building["provider"] == "ordnance_survey"
     assert building["country"] == "UK"
     assert building["roof_shape"] == "flat"
+    assert building["wall_insulation"] == "not provided"
+    assert building["upper_floor_insulation"] == "not provided"
+    assert building["lower_floor_insulation"] == "not provided"
+    assert building["glazing_type"] == "not provided"
     assert "bdnb_id" not in building
     assert ADDRESS in building["description"]
     assert "window" in svg.read_text()

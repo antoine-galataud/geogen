@@ -17,7 +17,7 @@ from typing import Any
 
 import requests
 
-from geogen.models import Address
+from geogen.models import NOT_PROVIDED, Address
 from geogen.models import AddressNotFoundError as ProviderAddressNotFoundError
 from geogen.models import BuildingGroup, ProviderError
 
@@ -57,6 +57,10 @@ ENVELOPE_COLUMNS = (
     "mat_toit_txt",
     "materiaux_toiture_simplifie",
     "type_plancher_haut_deperditif",
+    "type_isolation_mur_exterieur",
+    "type_isolation_plancher_haut",
+    "type_isolation_plancher_bas",
+    "type_vitrage",
 )
 
 BUILDING_GROUP_COLUMNS = GEOMETRY_COLUMNS + ENVELOPE_COLUMNS
@@ -75,6 +79,16 @@ GLAZING_COLUMNS = (
     "surface_vitree_sud",
     "surface_vitree_ouest",
 )
+
+#: DPE classifications exported as building metadata.
+ENVELOPE_CLASSIFICATION_COLUMNS = (
+    "type_isolation_mur_exterieur",
+    "type_isolation_plancher_haut",
+    "type_isolation_plancher_bas",
+    "type_vitrage",
+)
+
+DPE_COLUMNS = GLAZING_COLUMNS + ENVELOPE_CLASSIFICATION_COLUMNS
 
 #: Glazed area of a facade, per cardinal direction.
 GLAZED_AREA_COLUMNS = (
@@ -251,6 +265,10 @@ def building_group_from_row(
         glazing_orientations=_as_str_tuple(row.get("l_orientation_baie_vitree")),
         roof_material=row.get("materiaux_toiture_simplifie") or row.get("mat_toit_txt"),
         roof_type=row.get("type_plancher_haut_deperditif"),
+        wall_insulation=row.get("type_isolation_mur_exterieur", NOT_PROVIDED),
+        upper_floor_insulation=row.get("type_isolation_plancher_haut", NOT_PROVIDED),
+        lower_floor_insulation=row.get("type_isolation_plancher_bas", NOT_PROVIDED),
+        glazing_type=row.get("type_vitrage", NOT_PROVIDED),
     )
 
 
@@ -417,15 +435,30 @@ class BdnbClient:
         complete one, so the fenestration and the roof are looked up in the table they
         originate from when the merged one knows nothing about them.
         """
-        if row.get("pourcentage_surface_baie_vitree_exterieur") is None:
-            self._merge_row(row, DPE_TABLE, GLAZING_COLUMNS, batiment_groupe_id)
+        classifications_missing = any(
+            column not in row for column in ENVELOPE_CLASSIFICATION_COLUMNS
+        )
+        if row.get("pourcentage_surface_baie_vitree_exterieur") is None or classifications_missing:
+            self._merge_row(
+                row,
+                DPE_TABLE,
+                DPE_COLUMNS,
+                batiment_groupe_id,
+                preserve_null_columns=ENVELOPE_CLASSIFICATION_COLUMNS,
+            )
         for table, columns in ROOF_TABLES:
             if not _roof_is_unknown(row):
                 break
             self._merge_row(row, table, columns, batiment_groupe_id)
 
     def _merge_row(
-        self, row: dict[str, Any], table: str, columns: tuple[str, ...], batiment_groupe_id: str
+        self,
+        row: dict[str, Any],
+        table: str,
+        columns: tuple[str, ...],
+        batiment_groupe_id: str,
+        *,
+        preserve_null_columns: tuple[str, ...] = (),
     ) -> None:
         """Add to ``row`` the columns of ``table``, ignoring what the BDNB cannot serve."""
         try:
@@ -434,7 +467,9 @@ class BdnbClient:
             LOGGER.debug("Reading %s failed (%s), skipping it", table, error)
             return
         for column, value in (extra or {}).items():
-            if value is not None and row.get(column) is None:
+            if column in preserve_null_columns and column not in row:
+                row[column] = value
+            elif value is not None and row.get(column) is None:
                 row[column] = value
 
     def _table_row(

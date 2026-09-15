@@ -95,6 +95,10 @@ def test_building_group_parses_a_row(client: BdnbClient, building_row: dict) -> 
         glazing_orientations=("nord", "sud"),
         roof_material="tuiles",
         roof_type="Combles perdus",
+        wall_insulation="ITI",
+        upper_floor_insulation="isolé",
+        lower_floor_insulation="non isolé",
+        glazing_type="double vitrage",
     )
     assert "batiment_groupe_id=eq.bdnb-0001" in responses.calls[0].request.url
     assert "geom_groupe" in responses.calls[0].request.url
@@ -255,6 +259,79 @@ def test_the_dpe_is_not_read_when_the_percentage_is_known(
 
 
 @responses.activate
+def test_envelope_classifications_are_read_from_the_dpe_when_missing(
+    client: BdnbClient, building_row: dict, dpe_row: dict
+) -> None:
+    published = {
+        column: value
+        for column, value in building_row.items()
+        if not column.startswith("type_isolation_") and column != "type_vitrage"
+    }
+    responses.get(f"{BASE_URL}/donnees/batiment_groupe_complet", json=[published])
+    responses.get(f"{BASE_URL}/donnees/batiment_groupe_dpe_representatif_logement", json=[dpe_row])
+    responses.get(f"{BASE_URL}/donnees/batiment_groupe_wall_dict", json=[])
+
+    building = client.building_group("bdnb-0001")
+
+    assert building is not None
+    assert building.wall_insulation == "ITI"
+    assert building.upper_floor_insulation == "isolé"
+    assert building.lower_floor_insulation == "non isolé"
+    assert building.glazing_type == "double vitrage"
+    assert "type_isolation_mur_exterieur" in responses.calls[1].request.url
+    assert "type_vitrage" in responses.calls[1].request.url
+
+
+@responses.activate
+def test_explicit_null_classifications_are_preserved(
+    client: BdnbClient, building_row: dict
+) -> None:
+    published = dict(
+        building_row,
+        type_isolation_mur_exterieur=None,
+        type_isolation_plancher_haut=None,
+        type_isolation_plancher_bas=None,
+        type_vitrage=None,
+    )
+    responses.get(f"{BASE_URL}/donnees/batiment_groupe_complet", json=[published])
+    responses.get(f"{BASE_URL}/donnees/batiment_groupe_wall_dict", json=[])
+
+    building = client.building_group("bdnb-0001")
+
+    assert building is not None
+    assert building.wall_insulation is None
+    assert building.upper_floor_insulation is None
+    assert building.lower_floor_insulation is None
+    assert building.glazing_type is None
+    assert not any("dpe_representatif_logement" in call.request.url for call in responses.calls)
+
+
+@responses.activate
+def test_dpe_null_and_omitted_classifications_remain_distinct(
+    client: BdnbClient, building_row: dict
+) -> None:
+    published = {
+        column: value
+        for column, value in building_row.items()
+        if not column.startswith("type_isolation_") and column != "type_vitrage"
+    }
+    responses.get(f"{BASE_URL}/donnees/batiment_groupe_complet", json=[published])
+    responses.get(
+        f"{BASE_URL}/donnees/batiment_groupe_dpe_representatif_logement",
+        json=[{"type_isolation_mur_exterieur": None}],
+    )
+    responses.get(f"{BASE_URL}/donnees/batiment_groupe_wall_dict", json=[])
+
+    building = client.building_group("bdnb-0001")
+
+    assert building is not None
+    assert building.wall_insulation is None
+    assert building.upper_floor_insulation == "not provided"
+    assert building.lower_floor_insulation == "not provided"
+    assert building.glazing_type == "not provided"
+
+
+@responses.activate
 def test_the_roof_material_is_read_from_its_own_table(
     client: BdnbClient, building_row: dict
 ) -> None:
@@ -307,6 +384,10 @@ def test_columns_and_tables_are_only_rejected_once(client: BdnbClient, building_
 
     assert first is not None and second is not None
     assert first.glazed_ratio is None and second.glazed_ratio is None
+    assert first.wall_insulation == second.wall_insulation == "not provided"
+    assert first.upper_floor_insulation == second.upper_floor_insulation == "not provided"
+    assert first.lower_floor_insulation == second.lower_floor_insulation == "not provided"
+    assert first.glazing_type == second.glazing_type == "not provided"
     urls = [call.request.url for call in responses.calls]
     rejected = len(ENVELOPE_COLUMNS) + len(tables)
     assert len(urls) == rejected + 2

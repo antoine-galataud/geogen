@@ -19,7 +19,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from geogen.bdnb import BuildingGroup
+from geogen.models import Building
 
 LOGGER = logging.getLogger(__name__)
 
@@ -105,7 +105,7 @@ def cardinal_point(azimuth: float) -> str:
     return CARDINAL_POINTS[index]
 
 
-def window_to_wall_ratio(group: BuildingGroup, default_ratio: float | None = None) -> float | None:
+def window_to_wall_ratio(group: Building, default_ratio: float | None = None) -> float | None:
     """Return the share of the exterior walls covered by windows.
 
     The BDNB publishes the percentage of glazing of the exterior walls, and falls back on
@@ -133,7 +133,7 @@ def _as_ratio(value: float | None) -> float | None:
     return value / 100.0 if value > 1.0 else value
 
 
-def glazing_orientations(group: BuildingGroup) -> tuple[str, ...]:
+def glazing_orientations(group: Building) -> tuple[str, ...]:
     """Return the cardinal directions of the glazed facades.
 
     An empty tuple means that the orientations are unknown, in which case every exterior
@@ -190,13 +190,18 @@ def roof_pitch_from_material(material: str | None, default_pitch: float) -> floa
 
 
 def envelope_from_group(
-    group: BuildingGroup,
+    group: Building,
     *,
     default_roof_pitch: float = DEFAULT_ROOF_PITCH,
     default_window_to_wall_ratio: float | None = None,
 ) -> Envelope:
     """Approximate the envelope of a BDNB building group."""
-    pitch = roof_pitch_from_walls(group.walls)
+    shape = getattr(group, "roof_shape", None)
+    pitch = (
+        0.0
+        if shape == "flat"
+        else (default_roof_pitch if shape == "pitched" else roof_pitch_from_walls(group.walls))
+    )
     if pitch is None:
         for description in (group.roof_material, group.roof_type):
             pitch = roof_pitch_from_material(description, default_roof_pitch)

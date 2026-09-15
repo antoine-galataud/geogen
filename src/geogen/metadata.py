@@ -1,124 +1,113 @@
+"""Source-building metadata for BDNB, Ordnance Survey, and shared models."""
+
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+import re
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-from geogen.bdnb import BuildingGroup
+from geogen.models import Building, BuildingGroup, OsBuilding
 
 
 def _round_if_number(value: float | None, digits: int = 2) -> float | None:
-    if value is None:
-        return None
-    return round(float(value), digits)
+    return None if value is None else round(float(value), digits)
 
 
 def _sum_optional(values: Iterable[float | None], digits: int = 2) -> float | None:
     valid = [float(value) for value in values if value is not None]
-    if not valid:
-        return None
-    return round(sum(valid), digits)
+    return round(sum(valid), digits) if valid else None
 
 
-def building_group_metadata(group: BuildingGroup) -> dict[str, Any]:
+def building_metadata(building: Building) -> dict[str, Any]:
+    """Describe source measurements, without substituting geometry defaults."""
     estimated_floor_area = None
-    if group.footprint_area is not None and group.storeys is not None:
-        estimated_floor_area = group.footprint_area * group.storeys
+    if building.footprint_area is not None and building.storeys is not None:
+        estimated_floor_area = building.footprint_area * building.storeys
 
-    return {
-        "bdnb_id": group.code,
-        "address": group.address,
-        "city": group.city,
-        "footprint_area_m2": _round_if_number(group.footprint_area),
-        "number_of_storeys": group.storeys,
-        "height_m": _round_if_number(group.height),
-        "ground_elevation_m": _round_if_number(group.ground_elevation),
+    data = {
+        "building_id": building.code,
+        "provider": building.provider,
+        "country": building.country,
+        "crs": building.crs,
+        "address": building.address,
+        "city": building.city,
+        "footprint_area_m2": _round_if_number(building.footprint_area),
+        "number_of_storeys": building.storeys,
+        "height_m": _round_if_number(building.height),
+        "ground_elevation_m": _round_if_number(building.ground_elevation),
         "estimated_floor_area_m2": _round_if_number(estimated_floor_area),
-        "fictitious_geometry": group.fictitious_geometry,
-        "glazing_ratio": _round_if_number(group.glazed_ratio),
-        "roof_material": group.roof_material,
-        "roof_type": group.roof_type,
+        "fictitious_geometry": building.fictitious_geometry,
+        "glazing_ratio": _round_if_number(building.glazed_ratio),
+        "roof_material": building.roof_material,
+        "roof_type": building.roof_type,
+        "roof_shape": building.roof_shape,
     }
-
-
-import re
+    if isinstance(building, BuildingGroup):
+        data["bdnb_id"] = building.code
+    elif isinstance(building, OsBuilding):
+        data["os_id"] = building.os_id
+    return data
 
 
 def _street_address(address: str | None) -> str | None:
-    """Extract the street part from a BDNB address label.
-
-    Example:
-    "122 Rue Amelot 75011 Paris 11e Arrondissement"
-    becomes:
-    "122 Rue Amelot"
-    """
+    """Remove the postcode and locality from a French address label."""
     if not address:
         return None
-
-    # Remove everything starting from a French 5-digit postal code.
     street = re.split(r"\s+\d{5}\b", address, maxsplit=1)[0].strip()
-
     return street or address.strip()
 
 
-def building_group_description(group: BuildingGroup) -> str:
-    # Building type / number of storeys
-    if group.storeys is not None:
-        description = f"{group.storeys}-storey building"
-    else:
-        description = "Building"
-
-    # Location
-    street = _street_address(group.address)
-
-    if street and group.city:
-        description += f" located at {street}, in {group.city}"
+def building_description(building: Building) -> str:
+    """Generate a description using only known source attributes."""
+    description = (
+        f"{building.storeys}-storey building" if building.storeys is not None else "Building"
+    )
+    street = _street_address(building.address) if building.country == "FR" else building.address
+    if street and building.city:
+        description += f" located at {street}, in {building.city}"
     elif street:
         description += f" located at {street}"
-    elif group.city:
-        description += f" located in {group.city}"
+    elif building.city:
+        description += f" located in {building.city}"
 
-    # Building characteristics
     details: list[str] = []
-
-    if group.footprint_area is not None:
-        details.append(f"an approximate footprint of {group.footprint_area:.0f} m²")
-
-    if group.footprint_area is not None and group.storeys is not None:
-        estimated_floor_area = group.footprint_area * group.storeys
-        details.append(f"an estimated floor area of {estimated_floor_area:.0f} m²")
-
-    if group.height is not None:
-        details.append(f"a height of {group.height:.1f} m")
-
+    if building.footprint_area is not None:
+        details.append(f"an approximate footprint of {building.footprint_area:.0f} m²")
+    if building.footprint_area is not None and building.storeys is not None:
+        floor_area = building.footprint_area * building.storeys
+        details.append(f"an estimated floor area of {floor_area:.0f} m²")
+    if building.height is not None:
+        details.append(f"a height of {building.height:.1f} m")
     if details:
-        if len(details) == 1:
-            details_text = details[0]
-        else:
-            details_text = ", ".join(details[:-1]) + f", and {details[-1]}"
-
-        description += f", with {details_text}"
-
+        text = details[0] if len(details) == 1 else ", ".join(details[:-1]) + f", and {details[-1]}"
+        description += f", with {text}"
     return description + "."
 
 
+def building_group_metadata(group: Building) -> dict[str, Any]:
+    """Backward-compatible name for :func:`building_metadata`."""
+    return building_metadata(group)
+
+
+def building_group_description(group: Building) -> str:
+    """Backward-compatible name for :func:`building_description`."""
+    return building_description(group)
+
+
 def portfolio_metadata(
-    groups: dict[str, BuildingGroup] | Iterable[BuildingGroup],
+    groups: Mapping[str, Building] | Iterable[Building],
     *,
     source_addresses: Iterable[str] | None = None,
 ) -> dict[str, Any]:
-    if isinstance(groups, dict):
-        group_list = list(groups.values())
-    else:
-        group_list = list(groups)
-
+    """Summarize source buildings from any provider; unknown totals stay null."""
+    group_list = groups.values() if isinstance(groups, Mapping) else groups
     buildings = []
-    for group in group_list:
-        item = building_group_metadata(group)
-        item["description"] = building_group_description(group)
+    for building in group_list:
+        item = building_metadata(building)
+        item["description"] = building_description(building)
         buildings.append(item)
-
     return {
         "source_addresses": list(source_addresses or []),
         "building_count": len(buildings),

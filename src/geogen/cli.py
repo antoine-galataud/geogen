@@ -3,20 +3,13 @@
 from __future__ import annotations
 
 import logging
+from contextlib import ExitStack
 from pathlib import Path
 
 import click
 
 from geogen import __version__
-from geogen.bdnb import (
-    API_KEY_ENV_VAR,
-    DEFAULT_BASE_URL,
-    DEFAULT_TIMEOUT,
-    AddressNotFoundError,
-    BdnbClient,
-    BdnbError,
-    BuildingGroup,
-)
+from geogen.bdnb import API_KEY_ENV_VAR, DEFAULT_BASE_URL, DEFAULT_TIMEOUT
 from geogen.envelope import (
     DEFAULT_MAX_ROOF_HEIGHT,
     DEFAULT_ROOF_PITCH,
@@ -29,6 +22,8 @@ from geogen.geometry import (
     footprints_from_group,
 )
 from geogen.metadata import portfolio_metadata, save_metadata_json
+from geogen.models import AddressNotFoundError, Building, ProviderError
+from geogen.ordnance_survey import OsClient
 from geogen.osm import (
     DEFAULT_OUTPUT_FORMAT,
     OUTPUT_FORMATS,
@@ -39,6 +34,7 @@ from geogen.osm import (
     model_name,
     save_model,
 )
+from geogen.providers import BdnbProvider, discover_country
 from geogen.svg import (
     DEFAULT_CAMERA_AZIMUTH,
     DEFAULT_CAMERA_ELEVATION,
@@ -66,7 +62,7 @@ LOGGER = logging.getLogger(__name__)
     type=click.Path(dir_okay=False, writable=True, path_type=Path),
     default=None,
     help="Path of the model to write. Defaults to the name of the building, "
-    "that is the BDNB code of its building group, in the current directory.",
+    "that is the provider identifier, in the current directory.",
 )
 @click.option(
     "--json-output",
@@ -78,7 +74,7 @@ LOGGER = logging.getLogger(__name__)
 @click.option(
     "--name",
     default=None,
-    help="Name of the building in the model. Defaults to the BDNB code of the building group.",
+    help="Name of the building in the model. Defaults to the provider identifier.",
 )
 @click.option(
     "--svg-output",
@@ -127,7 +123,7 @@ LOGGER = logging.getLogger(__name__)
     type=click.FloatRange(min=0, min_open=True),
     default=DEFAULT_STOREY_HEIGHT,
     show_default=True,
-    help="Floor to floor height used when the BDNB height or storey count is missing.",
+    help="Floor to floor height used when the building height or storey count is missing.",
 )
 @click.option(
     "--simplify-tolerance",
@@ -141,7 +137,7 @@ LOGGER = logging.getLogger(__name__)
     type=click.FloatRange(min=0, max=100 * MAX_WINDOW_TO_WALL_RATIO),
     default=None,
     help="Estimated share of the exterior walls covered by windows, used for the buildings "
-    "whose fenestration is unknown to the BDNB. Given either as a fraction (0.2) or as a "
+    "whose fenestration is unknown to the data provider. Given either as a fraction (0.2) or as a "
     "percentage (20). Those buildings are left without any window when it is not given.",
 )
 @click.option(
@@ -149,7 +145,7 @@ LOGGER = logging.getLogger(__name__)
     type=click.FloatRange(min=0, max=80),
     default=DEFAULT_ROOF_PITCH,
     show_default=True,
-    help="Pitch in degrees of the sloped roofs whose inclination is unknown to the BDNB. "
+    help="Pitch in degrees of the sloped roofs whose inclination is unknown to the data provider. "
     "Set to 0 to only slope the roofs whose inclination is known.",
 )
 @click.option(
@@ -178,7 +174,22 @@ LOGGER = logging.getLogger(__name__)
     type=click.FloatRange(min=0, min_open=True),
     default=DEFAULT_TIMEOUT,
     show_default=True,
-    help="Timeout in seconds of the BDNB API requests.",
+    help="Timeout in seconds of API requests.",
+)
+@click.option(
+    "--country",
+    type=click.Choice(["auto", "FR", "UK", "GB"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help="Country override for all addresses.",
+)
+@click.option(
+    "--os-api-key", envvar="OS_API_KEY", help="OS key with Places and NGD Features access."
+)
+@click.option(
+    "--os-building-collection",
+    envvar="OS_BUILDING_COLLECTION",
+    help="NGD collection ID (supported/default: bld-fts-building-4).",
 )
 @click.option("-v", "--verbose", is_flag=True, help="Print debug information.")
 @click.version_option(__version__)
@@ -203,17 +214,29 @@ def main(
     base_url: str,
     timeout: float,
     verbose: bool,
+    country: str,
+    os_api_key: str | None,
+    os_building_collection: str | None,
 ) -> None:
     """Generate an OpenStudio geometry model (.osm) of the buildings at ADDRESSES.
 
-    The geometry of each building is downloaded from the BDNB (Base de Données Nationale des
-    Bâtiments) and extruded into one space per storey.
+    Geometry is downloaded from BDNB (France) or Ordnance Survey (Great Britain) and
+    extruded into one space per storey.
     """
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO, format="%(levelname)s: %(message)s"
     )
 
-    buildings = _download_buildings(addresses, api_key, base_url, timeout, max_buildings)
+    buildings = _download_buildings(
+        addresses,
+        api_key,
+        base_url,
+        timeout,
+        max_buildings,
+        country=country,
+        os_api_key=os_api_key,
+        os_building_collection=os_building_collection,
+    )
     if not buildings:
         raise click.ClickException("No building found for the given addresses")
 
@@ -264,29 +287,48 @@ def main(
 
 def _download_buildings(
     addresses: tuple[str, ...],
-    api_key: str,
+    api_key: str | None,
     base_url: str,
     timeout: float,
     max_buildings: int,
-) -> dict[str, BuildingGroup]:
-    """Download the building groups located at each address."""
-    buildings: dict[str, BuildingGroup] = {}
-    with BdnbClient(api_key, base_url=base_url, timeout=timeout) as client:
-        for address in addresses:
-            try:
-                found = client.buildings_for_address(address, max_buildings=max_buildings)
-            except AddressNotFoundError as error:
-                click.echo(f"Warning: {error}", err=True)
-                continue
-            except BdnbError as error:
-                raise click.ClickException(str(error)) from error
-            for building in found:
-                buildings.setdefault(building.code, building)
+    *,
+    country: str = "auto",
+    os_api_key: str | None = None,
+    os_building_collection: str | None = None,
+) -> dict[str, Building]:
+    """Resolve countries before network I/O and reuse each country's provider."""
+    buildings: dict[str, Building] = {}
+    try:
+        routes = [(address, discover_country(address, country)) for address in addresses]
+        with ExitStack() as stack:
+            clients = {}
+            for address, selected in routes:
+                if selected not in clients:
+                    client = (
+                        BdnbProvider(api_key, base_url=base_url, timeout=timeout)
+                        if selected == "FR"
+                        else OsClient(
+                            os_api_key, timeout=timeout, collection=os_building_collection
+                        )
+                    )
+                    stack.callback(client.close)
+                    clients[selected] = client
+                try:
+                    found = clients[selected].buildings_for_address(
+                        address, max_buildings=max_buildings
+                    )
+                except AddressNotFoundError as error:
+                    click.echo(f"Warning: {error}", err=True)
+                    continue
+                for building in found:
+                    buildings.setdefault(f"{selected}:{building.code}", building)
+    except ProviderError as error:
+        raise click.ClickException(str(error)) from error
     return buildings
 
 
 def _build_footprints(
-    buildings: dict[str, BuildingGroup],
+    buildings: dict[str, Building],
     storey_height: float,
     simplify_tolerance: float,
     roof_pitch: float,
@@ -294,6 +336,8 @@ def _build_footprints(
 ) -> list:
     """Convert the downloaded building groups into footprints."""
     footprints = []
+    # Use one projected CRS for the entire model, including mixed-country input.
+    target_crs = "EPSG:27700" if all(b.country == "UK" for b in buildings.values()) else "EPSG:2154"
     for building in buildings.values():
         if building.fictitious_geometry:
             click.echo(
@@ -304,6 +348,7 @@ def _build_footprints(
             footprints.extend(
                 footprints_from_group(
                     building,
+                    crs=target_crs,
                     default_storey_height=storey_height,
                     simplify_tolerance=simplify_tolerance,
                     default_roof_pitch=roof_pitch,

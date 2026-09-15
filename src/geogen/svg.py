@@ -16,11 +16,22 @@ import logging
 import math
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from heapq import heappop, heappush
 from pathlib import Path
 
+from shapely.geometry import LineString, Polygon
+from shapely.ops import unary_union
+from shapely.strtree import STRtree
+
 from geogen.envelope import DEFAULT_MAX_ROOF_HEIGHT, cardinal_point
-from geogen.geometry import Footprint, bounding_center, roof_apex
+from geogen.geometry import (
+    Footprint,
+    bounding_center,
+    exterior_ring,
+    floor_patches,
+    roof_faces,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -200,27 +211,18 @@ def _roof_drawables(
     max_roof_height: float,
 ) -> list[_Drawable]:
     top_z = base_z + footprint.height
-    ring = footprint.ring
-    pitch = footprint.envelope.roof_pitch
-    apex = roof_apex(ring, pitch, max_roof_height) if pitch else None
-
-    if apex is None:
-        top = tuple((x, y, top_z) for x, y in ring)
-        drawable = _Drawable(depth=projection.depth(top))
-        drawable.add_polygon(top, "roof flat-roof")
-        return [drawable]
-
-    apex_point = (apex[0], apex[1], top_z + apex[2])
-    drawables: list[_Drawable] = []
-    for index, start in enumerate(ring):
-        end = ring[(index + 1) % len(ring)]
-        triangle = (
-            (start[0], start[1], top_z),
-            (end[0], end[1], top_z),
-            apex_point,
-        )
-        drawable = _Drawable(depth=projection.depth(triangle))
-        drawable.add_polygon(triangle, "roof pitched-roof")
+    faces = roof_faces(footprint, max_roof_height)
+    pitched = bool(faces)
+    if not faces:
+        faces = [
+            tuple((x, y, 0) for x, y in exterior_ring(patch, 0))
+            for patch in floor_patches(footprint)
+        ]
+    drawables = []
+    for face in faces:
+        points = tuple((x, y, top_z + z) for x, y, z in face)
+        drawable = _Drawable(depth=projection.depth(points))
+        drawable.add_polygon(points, "roof pitched-roof" if pitched else "roof flat-roof")
         drawables.append(drawable)
     return drawables
 
@@ -235,13 +237,217 @@ def _build_scene(
 
     for footprint in footprints:
         base_z = _base_elevation(footprint, reference_elevation)
-        for edge_index in range(len(footprint.ring)):
-            drawables.append(_wall_drawable(footprint, edge_index, base_z, projection))
+        for ring in (footprint.ring, *footprint.holes):
+            wall_footprint = replace(footprint, ring=ring)
+            for edge_index in range(len(ring)):
+                drawables.append(_wall_drawable(wall_footprint, edge_index, base_z, projection))
         drawables.extend(_roof_drawables(footprint, base_z, projection, max_roof_height))
 
-    # Orthographic painter's algorithm: far groups first, near groups last.
-    drawables.sort(key=lambda drawable: drawable.depth)
-    return drawables
+    return _sort_drawables(drawables, projection)
+
+
+@dataclass(frozen=True)
+class _ProjectedFace:
+    polygon: Polygon
+    # Depth = a*x + b*y + c in orthographic screen coordinates (Y up).
+    plane: tuple[float, float, float]
+
+
+def _projected_face(drawable: _Drawable, projection: _Projection) -> _ProjectedFace | None:
+    points = [projection.camera(p) for p in drawable.primitives[0][1]]
+    polygon = Polygon([(x, y) for x, y, depth in points])
+    if polygon.is_empty or polygon.area < 1e-10:
+        return None  # a face seen exactly edge-on has no opaque area
+    x0, y0, d0 = points[0]
+    for i in range(1, len(points) - 1):
+        x1, y1, d1 = points[i]
+        x2, y2, d2 = points[i + 1]
+        determinant = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
+        if abs(determinant) < 1e-10:
+            continue
+        a = ((d1 - d0) * (y2 - y0) - (d2 - d0) * (y1 - y0)) / determinant
+        b = ((x1 - x0) * (d2 - d0) - (x2 - x0) * (d1 - d0)) / determinant
+        return _ProjectedFace(polygon, (a, b, d0 - a * x0 - b * y0))
+    return None
+
+
+def _plane_extrema(geometry, plane: tuple[float, float, float]) -> tuple[float, float]:
+    """Return the extrema of an affine plane over polygonal geometry."""
+    a, b, c = plane
+    polygons = [geometry] if isinstance(geometry, Polygon) else geometry.geoms
+    values = [
+        a * x + b * y + c
+        for polygon in polygons
+        if isinstance(polygon, Polygon)
+        for ring in (polygon.exterior, *polygon.interiors)
+        for x, y in ring.coords[:-1]
+    ]
+    return min(values), max(values)
+
+
+def _sort_drawables(drawables: list[_Drawable], projection: _Projection) -> list[_Drawable]:
+    """Sort opaque faces far-to-near using depth over their actual overlap.
+
+    Mean face depth is not sufficient for a tall facade whose visible overlap is behind a
+    shorter roof. Pairwise constraints fix those cases, including faces meeting at an edge.
+    Exact visibility clipping handles depth reversals and cycles.
+    """
+    faces = [_projected_face(drawable, projection) for drawable in drawables]
+    polygons = [face.polygon if face else Polygon() for face in faces]
+    tree = STRtree(polygons)
+    successors: list[set[int]] = [set() for _ in drawables]
+    indegree = [0] * len(drawables)
+
+    for face_index, face in enumerate(faces):
+        if face is None:
+            continue
+        for candidate in tree.query(face.polygon):
+            other_index = int(candidate)
+            if other_index <= face_index or faces[other_index] is None:
+                continue
+            other = faces[other_index]
+            overlap = face.polygon.intersection(other.polygon)
+            if overlap.is_empty or overlap.area < 1e-10:
+                continue
+            difference = (
+                other.plane[0] - face.plane[0],
+                other.plane[1] - face.plane[1],
+                other.plane[2] - face.plane[2],
+            )
+            minimum, maximum = _plane_extrema(overlap, difference)
+            if minimum >= -1e-7 and maximum > 1e-7:
+                far, near = face_index, other_index
+            elif maximum <= 1e-7 and minimum < -1e-7:
+                far, near = other_index, face_index
+            else:
+                continue
+            successors[far].add(near)
+            indegree[near] += 1
+
+    remaining = set(range(len(drawables)))
+    ready: list[tuple[float, int]] = []
+    for drawable_index, degree in enumerate(indegree):
+        if degree == 0:
+            heappush(ready, (drawables[drawable_index].depth, drawable_index))
+
+    ordered: list[_Drawable] = []
+    while remaining:
+        if ready:
+            _, drawable_index = heappop(ready)
+            if drawable_index not in remaining:
+                continue
+        else:
+            # Interlocking surfaces can form a painter-order cycle. Visibility
+            # clipping resolves it; break the cycle deterministically by mean depth.
+            drawable_index = min(remaining, key=lambda index: (drawables[index].depth, index))
+        remaining.remove(drawable_index)
+        ordered.append(drawables[drawable_index])
+        for successor in successors[drawable_index]:
+            indegree[successor] -= 1
+            if indegree[successor] == 0:
+                heappush(ready, (drawables[successor].depth, successor))
+
+    return ordered
+
+
+def _nearer_region(overlap, plane: tuple[float, float, float]):
+    """Clip overlap to the half-plane where the occluder is in front.
+
+    A single mean depth cannot order long roofs or intersecting projected faces. Comparing
+    their affine depth functions gives the correct visible portion.
+    """
+    a, b, c = plane
+    xmin, ymin, xmax, ymax = overlap.bounds
+    corners = [(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax)]
+
+    def distance(p):
+        return a * p[0] + b * p[1] + c
+
+    # Use tolerance only to reject coplanar faces, not to shift the cut: shifting
+    # both cuts leaves a strip where both faces are visible and order matters.
+    values = [distance(p) for p in corners]
+    if max(values) <= 1e-7:
+        return None
+    if min(values) >= 0:
+        return overlap
+    clipped = []
+    for start, end in zip(corners, corners[1:] + corners[:1]):
+        ds, de = distance(start), distance(end)
+        if ds >= 0:
+            clipped.append(start)
+        if (ds >= 0) != (de >= 0):
+            t = ds / (ds - de)
+            clipped.append((start[0] + t * (end[0] - start[0]), start[1] + t * (end[1] - start[1])))
+    if len(clipped) < 3:
+        return None
+    return overlap.intersection(Polygon(clipped))
+
+
+def _visible_regions(drawables: list[_Drawable], projection: _Projection) -> list:
+    """Exact planar visible regions for opaque faces, kept as vector geometry.
+
+    Wall decorations are intersected with their wall's visible region. STRtree limits
+    comparisons to overlapping screen bounds. Courtyards remain open.
+    """
+    faces = [_projected_face(d, projection) for d in drawables]
+    polygons = [f.polygon if f else Polygon() for f in faces]
+    tree = STRtree(polygons)
+    visible = []
+    for i, face in enumerate(faces):
+        if face is None:
+            visible.append(Polygon())
+            continue
+        occluded = []
+        for j in tree.query(face.polygon):
+            if i == j or faces[j] is None:
+                continue
+            other = faces[j]
+            overlap = face.polygon.intersection(other.polygon)
+            if overlap.is_empty or overlap.area < 1e-10:
+                continue
+            difference = (
+                other.plane[0] - face.plane[0],
+                other.plane[1] - face.plane[1],
+                other.plane[2] - face.plane[2],
+            )
+            nearer = _nearer_region(overlap, difference)
+            if nearer is not None and not nearer.is_empty:
+                occluded.append(nearer)
+        visible.append(face.polygon.difference(unary_union(occluded)) if occluded else face.polygon)
+    return visible
+
+
+def _clip_path_data(geometry, canvas) -> str:
+    """Encode all visible polygon parts and holes using the even-odd fill rule."""
+    parts = [geometry] if isinstance(geometry, Polygon) else list(getattr(geometry, "geoms", []))
+    commands = []
+    for part in parts:
+        if not isinstance(part, Polygon):
+            continue
+        for ring in (part.exterior, *part.interiors):
+            points = [canvas(p) for p in ring.coords[:-1]]
+            if not points:
+                continue
+            commands.append(
+                f"M {points[0][0]:.6f},{points[0][1]:.6f} "
+                + " ".join(f"L {x:.6f},{y:.6f}" for x, y in points[1:])
+                + " Z"
+            )
+    return " ".join(commands)
+
+
+def _line_path_data(geometry, canvas) -> str:
+    """Encode visible original edge fragments without connecting separate parts."""
+    if isinstance(geometry, LineString):
+        points = [canvas(point) for point in geometry.coords]
+        if len(points) < 2:
+            return ""
+        return f"M {points[0][0]:.6f},{points[0][1]:.6f} " + " ".join(
+            f"L {x:.6f},{y:.6f}" for x, y in points[1:]
+        )
+    return " ".join(
+        data for part in getattr(geometry, "geoms", []) if (data := _line_path_data(part, canvas))
+    )
 
 
 def _all_projected_points(drawables: Iterable[_Drawable], projection: _Projection) -> list[Point2D]:
@@ -285,7 +491,7 @@ def _canvas_transform(points: list[Point2D], width: int, height: int, margin: fl
 
 
 def _points_attribute(points: Iterable[Point2D]) -> str:
-    return " ".join(f"{x:.2f},{y:.2f}" for x, y in points)
+    return " ".join(f"{x:.6f},{y:.6f}" for x, y in points)
 
 
 def save_svg(
@@ -304,6 +510,8 @@ def save_svg(
 
     The returned SVG is a presentation asset, not a replacement for the OSM:
     simulation geometry continues to be generated by :func:`geogen.osm.build_model`.
+    Fills and original edges are clipped geometrically before writing SVG paths,
+    so occlusion does not depend on clipPath support or shared document IDs.
     """
     footprints = list(footprints)
     if not footprints:
@@ -334,7 +542,7 @@ def save_svg(
     )
     ET.SubElement(svg, f"{{{_SVG_NS}}}title").text = "Geogen building preview"
     ET.SubElement(svg, f"{{{_SVG_NS}}}metadata").text = (
-        "Generated by geogen from BDNB-derived building footprints"
+        "Generated by geogen from provider-derived building footprints"
     )
 
     style = ET.SubElement(svg, f"{{{_SVG_NS}}}style")
@@ -359,21 +567,39 @@ def save_svg(
     )
 
     scene = ET.SubElement(svg, f"{{{_SVG_NS}}}g", {"id": "scene"})
-    for drawable in drawables:
-        group = ET.SubElement(scene, f"{{{_SVG_NS}}}g")
+    visible_regions = _visible_regions(drawables, projection)
+    for index, (drawable, visible) in enumerate(zip(drawables, visible_regions)):
+        if visible.is_empty or visible.area < 1e-10:
+            continue
+        group = ET.SubElement(scene, f"{{{_SVG_NS}}}g", {"id": f"face-{index}"})
         for primitive, points_3d, css_class in drawable.primitives:
-            projected = [canvas(projection.project(point)) for point in points_3d]
+            projected = [projection.project(point) for point in points_3d]
             if primitive == "polygon":
-                ET.SubElement(
-                    group,
-                    f"{{{_SVG_NS}}}polygon",
-                    {"class": css_class, "points": _points_attribute(projected)},
-                )
+                polygon = Polygon(projected)
+                fill = polygon.intersection(visible)
+                if not fill.is_empty and fill.area > 1e-10:
+                    ET.SubElement(
+                        group,
+                        f"{{{_SVG_NS}}}path",
+                        {
+                            "class": css_class,
+                            "d": _clip_path_data(fill, canvas),
+                            "fill-rule": "evenodd",
+                            "style": "stroke: none",
+                        },
+                    )
+                # Stroke only original edges. Stroking the clipped polygon would
+                # invent outlines along an occluder's boundary or a courtyard cut.
+                edges = polygon.boundary
             else:
+                edges = LineString(projected)
+            stroke = edges.intersection(visible)
+            data = _line_path_data(stroke, canvas)
+            if data:
                 ET.SubElement(
                     group,
-                    f"{{{_SVG_NS}}}polyline",
-                    {"class": css_class, "points": _points_attribute(projected)},
+                    f"{{{_SVG_NS}}}path",
+                    {"class": css_class, "d": data, "style": "fill: none"},
                 )
 
     destination = Path(path)

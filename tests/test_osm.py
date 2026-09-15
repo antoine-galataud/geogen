@@ -173,7 +173,7 @@ def test_build_model_covers_a_building_with_a_sloped_roof() -> None:
     assert attic.zOrigin() == pytest.approx(3.0)
     assert attic.floorArea() == pytest.approx(200.0)
     # A hip roof of 30 degrees over a 20 m x 10 m footprint is 5 * tan(30) high.
-    assert attic.volume() == pytest.approx(200.0 * 2.8868 / 3, rel=1e-3)
+    assert attic.volume() == pytest.approx((200.0 / 2 - 100.0 / 6) * 2.8868, rel=1e-3)
     roofs = [surface for surface in attic.surfaces() if surface.surfaceType() == "RoofCeiling"]
     assert len(roofs) == len(RING)
     assert all(surface.outwardNormal().z() > 0 for surface in roofs)
@@ -192,7 +192,7 @@ def test_build_model_caps_the_height_of_the_roofs() -> None:
     attic = next(
         space for space in model.getSpaces() if space.nameString() == "bdnb-0001 Attic Space"
     )
-    assert attic.volume() == pytest.approx(200.0 * 2.0 / 3, rel=1e-3)
+    assert attic.volume() == pytest.approx((200.0 / 2 - 100.0 / 6) * 2.0, rel=1e-3)
 
 
 def test_build_model_leaves_flat_roofs_alone(footprint: Footprint) -> None:

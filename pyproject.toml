@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "geogen"
-version = "0.2.0"
+version = "0.3.0"
 description = "Generate OpenStudio and EnergyPlus geometry from French and British building data"
 authors = ["Antoine Galataud", "Davide Coraci"]
 readme = "README.md"

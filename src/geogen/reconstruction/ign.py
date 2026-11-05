@@ -13,6 +13,7 @@ from typing import Any, Iterable
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 import requests
+import shapely
 from pyproj import CRS
 from shapely import normalize
 from shapely.geometry import MultiPolygon, Polygon, box
@@ -416,8 +417,12 @@ class IgnClient:
         return result
 
 
-def build_pdal_pipeline(tiles, bounds, output_path):
-    """Write the original classified crop, declaring 1 mm output quantization."""
+def build_pdal_pipeline(tiles, bounds, output_path, polygon=None):
+    """Write the original classified crop, declaring 1 mm output quantization.
+
+    An optional (multi)polygon within ``bounds`` restricts the crop further, so
+    that distant parts of a selection do not pull in the points between them.
+    """
     if isinstance(tiles, dict):
         tiles = tiles["tiles"]
     bounds = checked_bounds(bounds)
@@ -427,14 +432,30 @@ def build_pdal_pipeline(tiles, bounds, output_path):
         raise IgnError("invalid_output_path", "Point-cloud output must use .las or .laz")
     west, south, east, north = bounds
     crop = f"([{west},{east}],[{south},{north}])"
+    region = {"bounds": crop}
+    if polygon is not None:
+        try:
+            shape = shapely.from_wkt(polygon) if isinstance(polygon, str) else polygon
+        except shapely.errors.GEOSException as error:
+            raise IgnError("invalid_extent", "Invalid extraction polygon") from error
+        if (
+            shape.geom_type not in {"Polygon", "MultiPolygon"}
+            or shape.is_empty
+            or not shape.is_valid
+            or not box(*bounds).buffer(1e-6).covers(shape)
+        ):
+            raise IgnError("invalid_extent", "Extraction polygon must be valid and within bounds")
+        # A single (multi)polygon keeps filters.crop to one output view.
+        region = {"polygon": shape.wkt}
     pipeline: list[dict[str, Any]] = [
         {"type": "readers.copc", "filename": copc_url(tile["url"]), "bounds": crop,
+         **({"polygon": region["polygon"]} if "polygon" in region else {}),
          "tag": f"tile_{index}"}
         for index, tile in enumerate(tiles)
     ]
     pipeline += [
         {"type": "filters.merge", "inputs": [f"tile_{i}" for i in range(len(tiles))], "tag": "merged"},
-        {"type": "filters.crop", "bounds": crop, "inputs": ["merged"], "tag": "original_crop"},
+        {"type": "filters.crop", **region, "inputs": ["merged"], "tag": "original_crop"},
         {"type": "writers.las", "filename": str(output), "inputs": ["original_crop"],
          "forward": "all", "extra_dims": "all", "minor_version": 4, "dataformat_id": 6,
          "scale_x": .001, "scale_y": .001, "scale_z": .001,

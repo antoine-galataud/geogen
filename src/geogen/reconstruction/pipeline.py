@@ -264,15 +264,22 @@ def local_footprints(units, frame: GeometryFrame) -> tuple[dict, dict]:
 
     Overlaps between source outlines would make solids intersect, so later units
     (by identifier) cede overlapping area to earlier ones; trims are reported.
+    Adjacent outlines often disagree by millimetres, so the ceding outline is
+    first snapped to its neighbours to avoid slivers below ``MIN_FEATURE``.
     """
+    from shapely import snap
     from shapely.affinity import translate
+
+    from geogen.reconstruction.conform import MIN_FEATURE
 
     footprints, trims = {}, {}
     for unit in sorted(units, key=lambda item: item.reconstruction_id):
         polygon = translate(from_wkt(unit.working_wkt), -frame.origin[0], -frame.origin[1])
         claimed = [other for other in footprints.values() if polygon.intersection(other).area > 1e-6]
         if claimed:
-            remainder = polygon.difference(unary_union(claimed))
+            others = unary_union(claimed)
+            snapped = snap(polygon, others, MIN_FEATURE)
+            remainder = (snapped if snapped.is_valid else polygon).difference(others)
             parts = sorted(
                 getattr(remainder, "geoms", [remainder]), key=lambda p: p.area, reverse=True
             )

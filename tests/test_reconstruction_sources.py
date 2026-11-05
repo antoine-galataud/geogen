@@ -5,6 +5,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 import requests
 import responses
+from shapely import from_wkt as shape_from_wkt
 from shapely.geometry import MultiPolygon, box, mapping, shape
 
 from geogen.bdnb import RELATIONSHIP_TABLES, BdnbClient, BdnbError, building_group_from_row
@@ -249,6 +250,25 @@ def test_two_pdal_readers_have_explicit_merge_and_original_class_artifact():
     assert all(stages[-1]["scale_" + axis] == .001 for axis in "xyz")
     assert all(stages[-1]["offset_" + axis] == "auto" for axis in "xyz")
     assert not any(stage["type"] == "filters.expression" for stage in stages)
+
+
+def test_pdal_crop_polygon_restricts_readers_and_crop_to_one_region():
+    parts = MultiPolygon(
+        [box(650000, 6860000, 650002, 6860002), box(650008, 6860008, 650010, 6860010)]
+    )
+    stages = build_pdal_pipeline(
+        [tile()], (650000, 6860000, 650010, 6860010), "crop.laz", polygon=parts
+    )["pipeline"]
+    assert shape_from_wkt(stages[0]["polygon"]).equals(parts)
+    crop = stages[2]
+    assert crop["type"] == "filters.crop" and "bounds" not in crop
+    assert shape_from_wkt(crop["polygon"]).equals(parts)
+    with pytest.raises(IgnError) as caught:
+        build_pdal_pipeline(
+            [tile()], (650000, 6860000, 650010, 6860010), "crop.laz",
+            polygon=box(650000, 6860000, 650020, 6860010),
+        )
+    assert caught.value.code == "invalid_extent"
 
 
 @pytest.mark.parametrize("change,code", [

@@ -9,6 +9,7 @@ import math
 from collections import defaultdict
 from dataclasses import asdict, replace
 
+from shapely import make_valid
 from shapely.errors import GEOSException
 from shapely.geometry import LineString, Polygon
 from shapely.ops import polygonize, split, unary_union
@@ -259,12 +260,52 @@ def _without_spikes(polygon):
     return cleaned
 
 
+def _noded(polygon):
+    """Insert ring vertices lying on other edges, as ``node_surfaces`` later would."""
+    rings = [list(polygon.exterior.coords)[:-1], *(list(r.coords)[:-1] for r in polygon.interiors)]
+    vertices = [p for ring in rings for p in ring]
+    result = []
+    for ring in rings:
+        noded = []
+        for a, b in zip(ring, (*ring[1:], ring[0])):
+            noded.append(a)
+            ab = (b[0] - a[0], b[1] - a[1])
+            squared = ab[0] ** 2 + ab[1] ** 2
+            hits = {
+                ((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / squared: p
+                for p in vertices
+                if p != a and p != b and squared > 0 and _backtracks(p, a, b)
+            }
+            noded.extend(hits[t] for t in sorted(hits) if 0 < t < 1)
+        result.append(noded)
+    return Polygon(result[0], result[1:])
+
+
 def _split_polygons(geometry):
-    return [
-        polygon
-        for polygon in (_without_spikes(p) for p in polygons(geometry))
-        if polygon is not None and polygon.area > TOLERANCE**2
-    ]
+    """Polygons of an overlay result, split where a ring pinches onto another edge.
+
+    Overlaying party walls whose roof lines partly coincide can leave one ring
+    joined by a zero-width corridor; edge noding would then repeat vertices.
+    """
+    result = []
+    for polygon in polygons(geometry):
+        noded = _noded(polygon)
+        if noded.is_valid:
+            pieces = [polygon]
+        else:
+            pieces = polygons(make_valid(noded, method="structure", keep_collapsed=False))
+            if abs(sum(p.area for p in pieces) - polygon.area) > TOLERANCE:
+                pieces = [polygon]
+        result.extend(_without_spikes(p) for p in pieces)
+    return [p for p in result if p is not None and p.area > TOLERANCE**2]
+
+
+def _restored(surface, originals):
+    return replace(
+        surface,
+        exterior=tuple(originals.get(p, p) for p in surface.exterior),
+        interiors=tuple(tuple(originals.get(p, p) for p in r) for r in surface.interiors),
+    )
 
 
 def _match_boundaries(spaces):
@@ -298,9 +339,23 @@ def _match_boundaries(spaces):
                         interface = hashlib.sha256(
                             f"{spaces[i].space_id}|{spaces[j].space_id}|{a.face_id}|{b.face_id}".encode()
                         ).hexdigest()[:20]
+                        # Projecting into a's plane moves vertices that are only planar within
+                        # tolerance; unchanged corners keep their exact source coordinates.
+                        originals = {
+                            lift(project(p, pa), pa): p
+                            for s in (a, b)
+                            for ring in (s.exterior, *s.interiors)
+                            for p in ring
+                        }
+
+                        def lifted(surface, polygon, suffix):
+                            return _restored(
+                                surface_from_polygon(surface, polygon, pa, suffix), originals
+                            )
+
                         shared_a, shared_b = [], []
                         for k, polygon in enumerate(_split_polygons(overlap)):
-                            sa = surface_from_polygon(a, polygon, pa, f":interface:{interface}:{k}")
+                            sa = lifted(a, polygon, f":interface:{interface}:{k}")
                             sb = _reverse(
                                 sa,
                                 face_id=f"{b.face_id}:interface:{interface}:{k}",
@@ -327,11 +382,11 @@ def _match_boundaries(spaces):
                                 )
                             )
                         remainder_a = [
-                            surface_from_polygon(a, p, pa, f":remainder:{interface}:{k}")
+                            lifted(a, p, f":remainder:{interface}:{k}")
                             for k, p in enumerate(_split_polygons(pa[4].difference(overlap)))
                         ]
                         remainder_b = [
-                            _reverse(surface_from_polygon(b, p, pa, f":remainder:{interface}:{k}"))
+                            _reverse(lifted(b, p, f":remainder:{interface}:{k}"))
                             for k, p in enumerate(_split_polygons(other.difference(overlap)))
                         ]
                         surfaces[i][ai : ai + 1] = shared_a + remainder_a
@@ -505,6 +560,151 @@ def _unify_scene_vertices(scene):
     )
 
 
+def _rings(surface):
+    return (surface.exterior, *surface.interiors)
+
+
+def _edge_position(point, a, b):
+    ab = sub(b, a)
+    squared = dot(ab, ab)
+    if squared <= TOLERANCE**2:
+        return None, math.inf
+    t = dot(sub(point, a), ab) / squared
+    return t, norm(sub(point, tuple(a[i] + t * ab[i] for i in range(3))))
+
+
+def _insert_junctions(scene):
+    """Insert vertices lying near another solid's edge into that edge.
+
+    Where a neighbour's roof line passes within OpenStudio's point equivalence of
+    a corner without meeting one of its vertices, interface matching would create
+    a crossing vertex next to that corner and a sliver OpenStudio cannot enclose.
+    Faces that would leave the planarity bound are triangulated on their source
+    vertices before the inserted vertex splits a boundary triangle. Returns the
+    scene and the largest distance between an inserted vertex and its edge.
+    """
+    from shapely import STRtree, box, points as shapely_points
+
+    owners = defaultdict(set)
+    edges = {}
+    for index, solid in enumerate(scene.solids):
+        for surface in solid.surfaces:
+            for ring in _rings(surface):
+                for a, b in zip(ring, (*ring[1:], ring[0])):
+                    owners[a].add(index)
+                    edges[(index, min(a, b), max(a, b))] = None
+    if len(scene.solids) < 2 or not edges:
+        return scene, 0.0
+    edges = list(edges)
+    cells = defaultdict(list)
+
+    def cell(point):
+        return tuple(math.floor(v / PARTY_WALL_TOLERANCE) for v in point)
+
+    for point in owners:
+        cells[cell(point)].append(point)
+
+    def near_vertex(point, index):
+        cx, cy, cz = cell(point)
+        return any(
+            index in owners[other]
+            and max(abs(p - q) for p, q in zip(point, other)) < PARTY_WALL_TOLERANCE
+            for dx, dy, dz in itertools.product((-1, 0, 1), repeat=3)
+            for other in cells.get((cx + dx, cy + dy, cz + dz), ())
+        )
+
+    tree = STRtree(
+        [
+            box(
+                min(a[0], b[0]) - PARTY_WALL_TOLERANCE,
+                min(a[1], b[1]) - PARTY_WALL_TOLERANCE,
+                max(a[0], b[0]) + PARTY_WALL_TOLERANCE,
+                max(a[1], b[1]) + PARTY_WALL_TOLERANCE,
+            )
+            for _, a, b in edges
+        ]
+    )
+    vertices = sorted(owners)
+    inserts = defaultdict(lambda: defaultdict(set))
+    moved = 0.0
+    for i, j in zip(*tree.query(shapely_points([p[:2] for p in vertices]), predicate="intersects")):
+        point, (index, a, b) = vertices[i], edges[j]
+        if index in owners[point]:
+            continue
+        t, distance = _edge_position(point, a, b)
+        if t is None or not 0 < t < 1 or not 1e-8 < distance < PARTY_WALL_TOLERANCE:
+            continue
+        if near_vertex(point, index):
+            continue
+        inserts[index][(a, b)].add(point)
+        moved = max(moved, distance)
+    if not inserts:
+        return scene, 0.0
+
+    def on_edge(solid_inserts, a, b):
+        points = solid_inserts.get((min(a, b), max(a, b)), ())
+        return sorted(points, key=lambda p: _edge_position(p, a, b)[0])
+
+    def junctioned(surface, solid_inserts):
+        def ring(points):
+            result = []
+            for a, b in zip(points, (*points[1:], points[0])):
+                result.append(a)
+                result.extend(on_edge(solid_inserts, a, b))
+            return tuple(result)
+
+        rings = tuple(ring(r) for r in _rings(surface))
+        if rings == _rings(surface):
+            return (surface,)
+        candidate = replace(surface, exterior=rings[0], interiors=rings[1:])
+        try:
+            if plane_deviation(candidate) <= TOLERANCE:
+                return (candidate,)
+        except ReconstructionError:
+            pass
+        triangles = [tuple(t) for t in face_triangles(surface)]
+        for edge, points in solid_inserts.items():
+            for k, triangle in enumerate(triangles):
+                for m in range(3):
+                    a, b, c = triangle[m], triangle[(m + 1) % 3], triangle[(m + 2) % 3]
+                    if (min(a, b), max(a, b)) == edge:
+                        chain = (a, *on_edge(solid_inserts, a, b), b)
+                        triangles[k : k + 1] = [(p, q, c) for p, q in zip(chain, chain[1:])]
+                        break
+                else:
+                    continue
+                break
+        return tuple(
+            replace(
+                surface,
+                face_id=f"{surface.face_id}:junction:{k}",
+                source_face_id=f"{surface.face_id}:junction:{k}",
+                exterior=triangle,
+                interiors=(),
+                provenance=(*surface.provenance, "party_wall_junction:triangulated"),
+            )
+            for k, triangle in enumerate(triangles)
+        )
+
+    return (
+        replace(
+            scene,
+            solids=tuple(
+                replace(
+                    solid,
+                    surfaces=tuple(
+                        piece for s in solid.surfaces for piece in junctioned(s, inserts[index])
+                    ),
+                )
+                if index in inserts
+                else solid
+                for index, solid in enumerate(scene.solids)
+            ),
+        ),
+        moved,
+    )
+
+
 def _assemble_thermal_scene(source, children_by_solid, report, unified_m=0.0):
     spaces = tuple(space for children in children_by_solid.values() for space in children)
     spaces = _checked_spaces(source.frame, spaces)
@@ -526,8 +726,9 @@ def _assemble_thermal_scene(source, children_by_solid, report, unified_m=0.0):
     )
     if unified_m:
         assumptions += (
-            f"vertices of adjacent solids within {PARTY_WALL_TOLERANCE:g} m are unified "
-            f"before interface matching (max movement {unified_m:.3g} m)",
+            f"vertices of adjacent solids within {PARTY_WALL_TOLERANCE:g} m are unified, "
+            "or inserted into the nearby edge, before interface matching "
+            f"(max movement {unified_m:.3g} m)",
         )
     return validate_thermal_scene(
         ThermalScene(source.frame, spaces, thermal_geometry_hash(source.frame, spaces), assumptions)
@@ -548,8 +749,9 @@ def make_thermal_scene(
     back atomically to the original solid. A combined-scene failure restores all
     successfully split solids before a strict retry. Source and final validation
     remain strict, and each solid's outcome is recorded under its ID in the report.
-    Near-coincident vertices of different solids are unified first, so
-    independently reconstructed neighbours share party-wall vertices.
+    Near-coincident vertices of different solids are unified first, and vertices
+    near another solid's edge are inserted into it, so independently
+    reconstructed neighbours share party-wall vertices.
     """
     scene = replace(
         scene,
@@ -564,6 +766,8 @@ def make_thermal_scene(
         ),
     )
     scene, unified_m = _unify_scene_vertices(scene)
+    scene, junction_m = _insert_junctions(scene)
+    unified_m = max(unified_m, junction_m)
     source = validate_scene(scene)
     if any(
         s.semantic

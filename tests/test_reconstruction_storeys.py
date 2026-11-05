@@ -1,5 +1,6 @@
 """Storey partitions must conserve the validated exterior, including its roof."""
 
+import math
 from dataclasses import replace
 
 import pytest
@@ -417,6 +418,77 @@ def test_zero_width_overlay_spikes_are_removed():
     assert cleaned.area == pytest.approx(spiked.area)
     square = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
     assert thermal_module._without_spikes(square).equals(square)
+
+
+def test_pinched_overlay_ring_is_split_where_a_vertex_touches_another_edge():
+    # The vertex (1.5, 1e-9) lies within node tolerance of the bottom edge.
+    pinched = Polygon([(0, 0), (3, 0), (3, 1), (2, 1), (1.5, 1e-9), (1, 1), (0, 1)])
+    assert pinched.is_valid
+    pieces = thermal_module._split_polygons(pinched)
+    assert len(pieces) == 2
+    assert all(p.is_valid for p in pieces)
+    assert sum(p.area for p in pieces) == pytest.approx(pinched.area)
+    square = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+    assert thermal_module._split_polygons(square) == [square]
+
+
+def test_party_wall_interfaces_keep_exact_source_corners_on_oblique_walls():
+    # Projection round-off on oblique walls must not give the two interface copies
+    # corners that differ from the shared source vertices.
+    angle = math.radians(37.0)
+    c, s = math.cos(angle), math.sin(angle)
+
+    def rotated(solid):
+        def turn(p):
+            x, y, z = p[0] - 45.5, p[1] - 140.7, p[2]
+            return (c * x - s * y - 45.123456789, s * x + c * y - 140.987654321, z)
+
+        return replace(
+            solid,
+            surfaces=tuple(
+                replace(
+                    f,
+                    exterior=tuple(turn(p) for p in f.exterior),
+                    interiors=tuple(tuple(turn(p) for p in r) for r in f.interiors),
+                )
+                for f in solid.surfaces
+            ),
+        )
+
+    a = rotated(prism("a", height=6.123))
+    b = rotated(prism("b", height=9.456, offset=(10.0, 0.0, 0.0)))
+    thermal = make_thermal_scene(GeometryScene(FRAME, (a, b)))
+    source = {p for solid in (a, b) for f in solid.surfaces for p in f.exterior}
+    shared = [
+        s
+        for space in thermal.spaces
+        for s in space.surfaces
+        if s.boundary == "surface" and s.semantic == "WallSurface"
+    ]
+    assert len(shared) == 2
+    assert all(p in source for s in shared for p in s.exterior)
+    assert validate_thermal_scene(thermal) is thermal
+
+
+def test_corner_near_a_neighbour_edge_is_inserted_into_that_edge():
+    # b's roof edge passes 1 cm below a's ridge corner and crosses a's steep roof
+    # edge right next to it, which OpenStudio would equate with that corner.
+    from geogen.osm import build_model_from_geometry
+
+    a = profile_solid(((0.0, 6.0), (5.0, 6.01), (10.0, 1.0)), name="a")
+    b = prism("b", offset=(0.0, -10.0, 0.0))
+    thermal = make_thermal_scene(GeometryScene(FRAME, (a, b)))
+    for space in thermal.spaces:
+        points = {p for s in space.surfaces for r in (s.exterior, *s.interiors) for p in r}
+        assert not [
+            (p, q)
+            for p in points
+            for q in points
+            if p < q and max(abs(x - y) for x, y in zip(p, q)) < thermal_module.PARTY_WALL_TOLERANCE
+        ]
+    assert any("inserted into the nearby edge" in t for t in thermal.assumptions)
+    assert validate_thermal_scene(thermal) is thermal
+    build_model_from_geometry(thermal)
 
 
 def test_submillimetre_party_wall_storey_strip_falls_back_to_original_envelopes():

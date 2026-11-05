@@ -74,9 +74,12 @@ def acquire(buildings, request, options, work: Path, runtime) -> Path:
                 "bdnb_relations_snapshot": content_hash(relations),
             },
         )
-        footprint = unary_union([from_wkt(u.working_wkt) for u in units])
+        # Context neighbours are only used as outlines; points are needed on the
+        # targets and in their ground search rings, which may be far apart.
+        footprint = unary_union([from_wkt(u.working_wkt) for u in units if u.role == "target"])
         xmin, ymin, xmax, ymax = footprint.bounds
         acquisition_buffer = GROUND_SEARCH_RADIUS
+        extraction = footprint.buffer(acquisition_buffer)
         bounds = checked_bounds(
             (
                 xmin - acquisition_buffer,
@@ -89,7 +92,9 @@ def acquire(buildings, request, options, work: Path, runtime) -> Path:
         write_json(work / "tiles.json", tile_snapshot)
         header_provenance = ign.verify_tile_headers(tile_snapshot)
         write_json(work / "tile-headers.json", header_provenance)
-    pipeline = build_pdal_pipeline(tile_snapshot, bounds, "/work/lidar.original.laz")
+    pipeline = build_pdal_pipeline(
+        tile_snapshot, bounds, "/work/lidar.original.laz", polygon=extraction
+    )
     pipeline_path = write_json(work / "pdal-pipeline.json", pipeline)
     runtime.run(
         ["pdal", "pipeline", runtime.container_path(pipeline_path, work)], work, network=True

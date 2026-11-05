@@ -130,7 +130,11 @@ def test_acquisition_retains_manifest_and_expands_crop(monkeypatch, tmp_path, of
         "geogen.reconstruction.acquire.BdnbClient.relationship_rows", lambda *a, **k: {}
     )
     monkeypatch.setattr(IgnClient, "buildings_for_sources", lambda *a, **k: {})
-    monkeypatch.setattr("geogen.reconstruction.acquire.resolve_units", lambda *a, **k: (selected,))
+    # A large context neighbour far away must not widen the point-cloud crop.
+    context = unit("context", outline=box(X - 400, Y - 400, X - 300, Y - 300), role="context")
+    monkeypatch.setattr(
+        "geogen.reconstruction.acquire.resolve_units", lambda *a, **k: (selected, context)
+    )
     monkeypatch.setattr(IgnClient, "verify_tile_headers", lambda *a: {})
     extents = []
 
@@ -139,7 +143,11 @@ def test_acquisition_retains_manifest_and_expands_crop(monkeypatch, tmp_path, of
         return {"tiles": [{"vertical_reference": "IGN69"}]}
 
     monkeypatch.setattr(IgnClient, "tiles", tiles)
-    monkeypatch.setattr("geogen.reconstruction.acquire.build_pdal_pipeline", lambda *a, **k: {})
+    crops = []
+    monkeypatch.setattr(
+        "geogen.reconstruction.acquire.build_pdal_pipeline",
+        lambda *a, **k: crops.append(k["polygon"]) or {},
+    )
 
     class Runtime:
         def container_path(self, path, work):
@@ -166,6 +174,7 @@ def test_acquisition_retains_manifest_and_expands_crop(monkeypatch, tmp_path, of
     unverified = offset > buffer
     assert extents == [(X - buffer, Y - buffer, X + 10 + buffer, Y + 10 + buffer)]
     assert manifest["acquisition_buffer_m"] == buffer
+    assert crops[0].equals(box(X, Y, X + 10, Y + 10).buffer(buffer))
     assert manifest["ground_references"]["target"]["status"] == (
         "ground_unverified" if unverified else "observed"
     )
@@ -205,3 +214,35 @@ def test_acquisition_retains_manifest_and_expands_crop(monkeypatch, tmp_path, of
     assert report["ground_references"]["target"]["status"] == "ground_unverified"
     assert report["units"][0]["failure"]["code"] == "ground_unverified"
     assert not report["outputs_published"]
+
+
+def test_ceded_outline_is_snapped_to_its_neighbour_without_slivers():
+    import math
+
+    from shapely.geometry import Polygon
+
+    from geogen.reconstruction.conform import MIN_FEATURE
+    from geogen.reconstruction.pipeline import local_footprints
+    from geogen.reconstruction.types import GeometryFrame
+
+    def outline(points):
+        return Polygon([(X + x, Y + y) for x, y in points])
+
+    # BD TOPO party wall misaligned by 6.5 mm; the neighbour corner lies inside.
+    first = unit("a", outline=outline([
+        (1.1, -97.5), (4.3, -82.8), (8.5, -76.3), (13.7, -76.6), (15.2, -82.8),
+        (20.5, -81.6), (23.9, -85.4), (20.8, -89.8), (31.8, -96.6), (11.4, -128.6),
+        (6.0, -122.4), (3.5, -120.8), (13.3, -105.5), (7.6, -101.7),
+    ]))
+    second = unit("b", outline=outline([
+        (9.3, -69.9), (13.7, -63.3), (17.0, -65.6), (27.5, -63.3), (31.1, -79.2),
+        (15.2, -82.8), (12.6, -72.1),
+    ]))
+    footprints, trims = local_footprints(
+        (second, first), GeometryFrame("EPSG:2154", "IGN69", (X, Y, 0.0))
+    )
+    ring = list(footprints["b"].exterior.coords)[:-1]
+    assert min(math.dist(p, q) for p, q in zip(ring, ring[1:] + ring[:1])) >= MIN_FEATURE
+    assert footprints["b"].intersection(footprints["a"]).area < 1e-9
+    assert any(math.dist(p, (13.7, -76.6)) < 1e-6 for p in ring)
+    assert 0 < trims["b"]["removed_area_m2"] < 0.05

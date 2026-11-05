@@ -391,9 +391,38 @@ def test_combined_identifier_collision_is_strict_without_opt_in_fallback():
     assert_conserved(collision, thermal)
 
 
+def test_submillimetre_party_wall_corner_mismatch_is_unified_across_solids():
+    # Independently reconstructed neighbours whose party-wall corners differ by 40 µm.
+    a = prism("a")
+    b = prism("b", height=6.00004, offset=(10.0, 0.0, 0.0))
+    thermal = make_thermal_scene(GeometryScene(FRAME, (a, b)), levels={"a": [3.0], "b": [3.0]})
+    shared = [s for space in thermal.spaces for s in space.surfaces if s.boundary == "surface"]
+    walls = [s for s in shared if s.semantic == "WallSurface"]
+    assert sum(face_plane(s)[4].area for s in walls) == pytest.approx(120.0)
+    assert not any(
+        "remainder" in s.face_id and s.semantic == "WallSurface"
+        for space in thermal.spaces
+        for s in space.surfaces
+    )
+    assert sum(space.volume for space in thermal.spaces) == pytest.approx(1200.0, abs=1e-2)
+    assert any("adjacent solids within 0.0127 m are unified" in t for t in thermal.assumptions)
+    assert validate_thermal_scene(thermal) is thermal
+
+
+def test_zero_width_overlay_spikes_are_removed():
+    # The ring doubles back from (5, 0) through (0.004, 0) to the origin.
+    spiked = Polygon([(0.0, 0.0), (-1.0, 1.0), (0.004, 0.0), (5.0, -1e-10)])
+    cleaned = thermal_module._without_spikes(spiked)
+    assert list(cleaned.exterior.coords)[:-1] == [(0.0, 0.0), (-1.0, 1.0), (0.004, 0.0)]
+    assert cleaned.area == pytest.approx(spiked.area)
+    square = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+    assert thermal_module._without_spikes(square).equals(square)
+
+
 def test_submillimetre_party_wall_storey_strip_falls_back_to_original_envelopes():
     a = prism("a", height=6.0)
-    b = prism("b", height=6.0015, offset=(10.0, 0.0, 0.0))
+    # Roofs differ beyond the party-wall vertex unification bound; only the cuts nearly coincide.
+    b = prism("b", height=6.05, offset=(10.0, 0.0, 0.0))
     scene = GeometryScene(FRAME, (a, b))
     levels = {"a": [3.0], "b": [3.00075]}
     for solid in (a, b):

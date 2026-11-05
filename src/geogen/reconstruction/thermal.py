@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import math
+from collections import defaultdict
 from dataclasses import asdict, replace
 
 from shapely.errors import GEOSException
@@ -25,17 +27,23 @@ from .validate import (
     _SolidIndex,
     dot,
     face_plane,
+    face_triangles,
     fail,
     lift,
     node_surfaces,
     norm,
     planar_pieces,
+    plane_deviation,
     polygons,
     project,
     sub,
     surface_from_polygon,
     validate_scene,
 )
+
+
+# OpenStudio's per-axis point equivalence (isAlmostEqual3dPt) used to match edges.
+PARTY_WALL_TOLERANCE = 0.0127
 
 
 def thermal_geometry_hash(frame, spaces):
@@ -210,6 +218,55 @@ def _partition(solid, cuts):
     return result
 
 
+def _backtracks(p, a, b):
+    """Whether ``p`` lies on segment ``a``-``b`` within the edge-noding tolerance."""
+    ab = (b[0] - a[0], b[1] - a[1])
+    squared = ab[0] ** 2 + ab[1] ** 2
+    if squared == 0:
+        return math.dist(p, a) < 1e-8
+    t = ((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / squared
+    closest = (a[0] + ab[0] * min(1, max(0, t)), a[1] + ab[1] * min(1, max(0, t)))
+    return math.dist(p, closest) < 1e-8
+
+
+def _without_spikes(polygon):
+    """Drop zero-width spikes left by overlaying near-collinear party-wall edges.
+
+    A vertex whose ring doubles back onto the previous or next edge encloses no
+    area beyond arithmetic noise, but edge noding would revisit its neighbour.
+    """
+
+    def clean(coords):
+        ring = list(coords)[:-1]
+        changed = True
+        while changed and len(ring) >= 3:
+            changed = False
+            for i, v in enumerate(ring):
+                u, w = ring[i - 1], ring[(i + 1) % len(ring)]
+                if _backtracks(u, v, w) or _backtracks(w, u, v):
+                    del ring[i]
+                    changed = True
+                    break
+        return ring
+
+    exterior = clean(polygon.exterior.coords)
+    interiors = [clean(r.coords) for r in polygon.interiors]
+    if len(exterior) < 3:
+        return None
+    cleaned = Polygon(exterior, [r for r in interiors if len(r) >= 3])
+    if not cleaned.is_valid or abs(cleaned.area - polygon.area) > TOLERANCE:
+        return polygon
+    return cleaned
+
+
+def _split_polygons(geometry):
+    return [
+        polygon
+        for polygon in (_without_spikes(p) for p in polygons(geometry))
+        if polygon is not None and polygon.area > TOLERANCE**2
+    ]
+
+
 def _match_boundaries(spaces):
     """Split partial coplanar interfaces; preserve every exterior remainder."""
     surfaces = [list(space.surfaces) for space in spaces]
@@ -242,7 +299,7 @@ def _match_boundaries(spaces):
                             f"{spaces[i].space_id}|{spaces[j].space_id}|{a.face_id}|{b.face_id}".encode()
                         ).hexdigest()[:20]
                         shared_a, shared_b = [], []
-                        for k, polygon in enumerate(polygons(overlap)):
+                        for k, polygon in enumerate(_split_polygons(overlap)):
                             sa = surface_from_polygon(a, polygon, pa, f":interface:{interface}:{k}")
                             sb = _reverse(
                                 sa,
@@ -271,13 +328,11 @@ def _match_boundaries(spaces):
                             )
                         remainder_a = [
                             surface_from_polygon(a, p, pa, f":remainder:{interface}:{k}")
-                            for k, p in enumerate(polygons(pa[4].difference(overlap)))
-                            if p.area > TOLERANCE**2
+                            for k, p in enumerate(_split_polygons(pa[4].difference(overlap)))
                         ]
                         remainder_b = [
                             _reverse(surface_from_polygon(b, p, pa, f":remainder:{interface}:{k}"))
-                            for k, p in enumerate(polygons(other.difference(overlap)))
-                            if p.area > TOLERANCE**2
+                            for k, p in enumerate(_split_polygons(other.difference(overlap)))
                         ]
                         surfaces[i][ai : ai + 1] = shared_a + remainder_a
                         surfaces[j][bi : bi + 1] = shared_b + remainder_b
@@ -350,7 +405,107 @@ def _check_conservation(original, children):
             fail(f"Thermal partition changed source face {surface.face_id}")
 
 
-def _assemble_thermal_scene(source, children_by_solid, report):
+def _unify_scene_vertices(scene):
+    """Merge near-coincident vertices of different solids before interface matching.
+
+    Adjacent solids are reconstructed independently, so a shared party-wall corner
+    may differ by a few millimetres. Interface remainders would then be slivers that
+    OpenStudio's 12.7 mm point equivalence cannot enclose. Vertices of different
+    solids within that bound are moved to one existing representative, unless a
+    solid owns two of them. Faces that would leave the planarity bound are first
+    triangulated on their source vertices. Returns the scene and the largest move.
+    """
+    owners = defaultdict(set)
+    for index, solid in enumerate(scene.solids):
+        for surface in solid.surfaces:
+            for ring in (surface.exterior, *surface.interiors):
+                for point in ring:
+                    owners[point].add(index)
+    points = sorted(owners)
+    parent = list(range(len(points)))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def cell(point):
+        return tuple(math.floor(v / PARTY_WALL_TOLERANCE) for v in point)
+
+    cells = defaultdict(list)
+    for i, point in enumerate(points):
+        cells[cell(point)].append(i)
+    for i, point in enumerate(points):
+        cx, cy, cz = cell(point)
+        for dx, dy, dz in itertools.product((-1, 0, 1), repeat=3):
+            for j in cells.get((cx + dx, cy + dy, cz + dz), ()):
+                if (
+                    j > i
+                    and owners[point].isdisjoint(owners[points[j]])
+                    and max(abs(a - b) for a, b in zip(point, points[j])) < PARTY_WALL_TOLERANCE
+                ):
+                    parent[root(j)] = root(i)
+    clusters = defaultdict(list)
+    for i in range(len(points)):
+        clusters[root(i)].append(points[i])
+    mapping = {}
+    for cluster in clusters.values():
+        if len(cluster) < 2:
+            continue
+        solids = [owner for point in cluster for owner in owners[point]]
+        if len(solids) != len(set(solids)):
+            continue
+        representative = min(cluster)
+        mapping.update({point: representative for point in cluster if point != representative})
+    if not mapping:
+        return scene, 0.0
+
+    def ring(points):
+        return tuple(mapping.get(p, p) for p in points)
+
+    def unified(surface):
+        if not any(p in mapping for r in (surface.exterior, *surface.interiors) for p in r):
+            return (surface,)
+        moved = replace(
+            surface, exterior=ring(surface.exterior), interiors=tuple(map(ring, surface.interiors))
+        )
+        try:
+            if plane_deviation(moved) <= TOLERANCE:
+                return (moved,)
+        except ReconstructionError:
+            pass
+        pieces = []
+        for k, triangle in enumerate(face_triangles(surface)):
+            face_id = f"{surface.face_id}:unified:{k}"
+            pieces.append(
+                replace(
+                    surface,
+                    face_id=face_id,
+                    source_face_id=face_id,
+                    exterior=ring(triangle),
+                    interiors=(),
+                    provenance=(*surface.provenance, "party_wall_vertex_unification:triangulated"),
+                )
+            )
+        return tuple(pieces)
+
+    return (
+        replace(
+            scene,
+            solids=tuple(
+                replace(
+                    solid,
+                    surfaces=tuple(piece for s in solid.surfaces for piece in unified(s)),
+                )
+                for solid in scene.solids
+            ),
+        ),
+        max(math.dist(p, q) for p, q in mapping.items()),
+    )
+
+
+def _assemble_thermal_scene(source, children_by_solid, report, unified_m=0.0):
     spaces = tuple(space for children in children_by_solid.values() for space in children)
     spaces = _checked_spaces(source.frame, spaces)
     spaces = _match_boundaries(spaces)
@@ -369,6 +524,11 @@ def _assemble_thermal_scene(source, children_by_solid, report):
         "GroundSurface treated as ground-contact; other unpaired faces outdoors",
         "faces warped within 0.001 m are triangulated without relocating their vertices",
     )
+    if unified_m:
+        assumptions += (
+            f"vertices of adjacent solids within {PARTY_WALL_TOLERANCE:g} m are unified "
+            f"before interface matching (max movement {unified_m:.3g} m)",
+        )
     return validate_thermal_scene(
         ThermalScene(source.frame, spaces, thermal_geometry_hash(source.frame, spaces), assumptions)
     )
@@ -388,6 +548,8 @@ def make_thermal_scene(
     back atomically to the original solid. A combined-scene failure restores all
     successfully split solids before a strict retry. Source and final validation
     remain strict, and each solid's outcome is recorded under its ID in the report.
+    Near-coincident vertices of different solids are unified first, so
+    independently reconstructed neighbours share party-wall vertices.
     """
     scene = replace(
         scene,
@@ -401,6 +563,7 @@ def make_thermal_scene(
             for solid in scene.solids
         ),
     )
+    scene, unified_m = _unify_scene_vertices(scene)
     source = validate_scene(scene)
     if any(
         s.semantic
@@ -466,7 +629,7 @@ def make_thermal_scene(
         report[solid.solid_id] = entry
         children_by_solid[solid.solid_id] = children
     try:
-        thermal = _assemble_thermal_scene(source, children_by_solid, report)
+        thermal = _assemble_thermal_scene(source, children_by_solid, report, unified_m)
     except (ReconstructionError, GEOSException) as exc:
         partitioned = [key for key, entry in report.items() if entry["status"] == "partitioned"]
         if partition_report is None or not partitioned:
@@ -483,7 +646,7 @@ def make_thermal_scene(
                     "message": f"Combined thermal partition validation failed: {exc}",
                 },
             )
-        thermal = _assemble_thermal_scene(source, children_by_solid, report)
+        thermal = _assemble_thermal_scene(source, children_by_solid, report, unified_m)
     if partition_report is not None:
         partition_report.update(report)
     return thermal

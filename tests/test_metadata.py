@@ -3,11 +3,9 @@ from types import MappingProxyType
 
 import pytest
 
-from geogen.bdnb import BuildingGroup
+from geogen.bdnb import BuildingGroup, building_group_from_row
 from geogen.metadata import (
     building_description,
-    building_group_description,
-    building_group_metadata,
     building_metadata,
     portfolio_metadata,
     save_metadata_json,
@@ -34,7 +32,7 @@ def test_building_group_metadata():
         glazing_type="double vitrage",
     )
 
-    data = building_group_metadata(group)
+    data = building_metadata(group)
 
     assert data["bdnb_id"] == "bg-123"
     assert data["footprint_area_m2"] == 420.0
@@ -59,7 +57,7 @@ def test_building_group_description():
         city="Paris",
     )
 
-    description = building_group_description(group)
+    description = building_description(group)
 
     assert description == (
         "5-storey building located at 122 Rue Amelot, in Paris, "
@@ -179,8 +177,6 @@ def test_generic_building_is_not_mislabeled_by_country_or_prefix(country):
     assert data["height_m"] is None
     assert data["estimated_floor_area_m2"] is None
     assert building_description(building) == "Building."
-    assert building_group_metadata(building) == data
-    assert building_group_description(building) == building_description(building)
 
 
 def test_non_french_description_does_not_strip_five_digit_address_component():
@@ -204,7 +200,7 @@ def test_unknown_and_zero_measurements_in_portfolios():
 
 
 def test_standalone_bdnb_identifier_is_preserved_in_metadata():
-    building = BuildingGroup.from_row({"rnb_id": "standalone"})
+    building = building_group_from_row({"rnb_id": "standalone"})
     data = building_metadata(building)
     assert data["provider"] == "bdnb"
     assert data["bdnb_id"] == data["building_id"] == "standalone"

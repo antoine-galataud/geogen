@@ -35,6 +35,7 @@ from geogen.osm import (
     save_model,
 )
 from geogen.providers import BdnbProvider, discover_country
+from geogen.reconstruction.options import reconstruction_options
 from geogen.svg import (
     DEFAULT_CAMERA_AZIMUTH,
     DEFAULT_CAMERA_ELEVATION,
@@ -48,6 +49,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
+@reconstruction_options
 @click.argument("addresses", nargs=-1, required=True)
 @click.option(
     "-k",
@@ -217,6 +219,7 @@ def main(
     country: str,
     os_api_key: str | None,
     os_building_collection: str | None,
+    **reconstruction,
 ) -> None:
     """Generate an OpenStudio geometry model (.osm) of the buildings at ADDRESSES.
 
@@ -226,6 +229,16 @@ def main(
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO, format="%(levelname)s: %(message)s"
     )
+
+    if reconstruction["roof_source"] == "roofer":
+        from geogen.reconstruction.command import run
+
+        run(click.get_current_context().params, _download_buildings)
+        return
+    if reconstruction["reconstruction_input"] or reconstruction["roofer_missing_roof_height"]:
+        raise click.ClickException(
+            "--reconstruction-input/--roofer-missing-roof-height require --roof-source roofer"
+        )
 
     buildings = _download_buildings(
         addresses,
@@ -295,6 +308,7 @@ def _download_buildings(
     country: str = "auto",
     os_api_key: str | None = None,
     os_building_collection: str | None = None,
+    strict: bool = False,
 ) -> dict[str, Building]:
     """Resolve countries before network I/O and reuse each country's provider."""
     buildings: dict[str, Building] = {}
@@ -317,7 +331,11 @@ def _download_buildings(
                     found = clients[selected].buildings_for_address(
                         address, max_buildings=max_buildings
                     )
+                    if strict and not found:
+                        raise AddressNotFoundError(f"No building found at address {address!r}")
                 except AddressNotFoundError as error:
+                    if strict:
+                        raise
                     click.echo(f"Warning: {error}", err=True)
                     continue
                 for building in found:

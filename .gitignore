@@ -15,3 +15,11 @@ htmlcov/
 .idea/
 node_modules
 requirements.txt
+
+# Local reconstruction diagnostics (portable fixtures live under tests/fixtures)
+/.geogen-runtime/
+/.runtime-*/
+/.pytest-evidence-work/
+/.geometry-test-work/
+/runtime-logs/
+/roofer.log.json

@@ -116,13 +116,13 @@ def test_svg_bakes_occlusion_into_fills_and_decorations(tmp_path, monkeypatch):
     roof = _camera_face([(1, 1, 1), (3, 1, 1), (3, 3, 1), (1, 3, 1)], "roof")
     # Deliberately put the facade last and give its visible region a hole.
     monkeypatch.setattr(svg, "_build_scene", lambda *args: [roof, wall])
+    monkeypatch.setattr(svg, "DEFAULT_SVG_MARGIN", 0)
     footprint = Footprint("test", ((0, 0), (0, 4), (4, 4), (4, 0)), 4, 1)
     path = save_svg(
         [footprint],
         tmp_path / "occlusion.svg",
         width=400,
         height=400,
-        margin=0,
         azimuth=0,
         elevation=0,
     )

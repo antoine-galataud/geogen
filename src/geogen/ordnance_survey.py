@@ -69,9 +69,6 @@ class OsClient:
         api_key: str | None,
         *,
         timeout: float = 30,
-        session: requests.Session | None = None,
-        places_url: str = PLACES_URL,
-        ngd_url: str = NGD_URL,
         collection: str | None = None,
     ) -> None:
         if not api_key:
@@ -79,14 +76,12 @@ class OsClient:
                 "UK addresses require OS_API_KEY (or --os-api-key), with OS Places and NGD Features access"
             )
         self.timeout = timeout
-        self.places_url = places_url.rstrip("/")
-        self.ngd_url = ngd_url.rstrip("/")
         self.collection = collection or "bld-fts-building-4"
         if self.collection != "bld-fts-building-4":
             raise OsError(
                 "Only the OS NGD Building v4 collection (bld-fts-building-4) is supported"
             )
-        self._session = session or requests.Session()
+        self._session = requests.Session()
         # Header authentication avoids exposing the API key in request URLs/logs.
         self._session.headers.update({"key": api_key, "Accept": "application/json"})
         self._addresses: dict[str, dict] = {}
@@ -94,12 +89,6 @@ class OsClient:
 
     def close(self) -> None:
         self._session.close()
-
-    def __enter__(self) -> OsClient:
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        self.close()
 
     def _get(self, url: str, params: dict | None = None) -> dict:
         try:
@@ -159,7 +148,7 @@ class OsClient:
         if cache_key in self._addresses:
             return self._addresses[cache_key]
         payload = self._get(
-            f"{self.places_url}/find",
+            f"{PLACES_URL}/find",
             {
                 "query": query,
                 "dataset": "DPA",
@@ -168,7 +157,6 @@ class OsClient:
                 "minmatch": 0.8,
             },
         )
-        print(payload)
         if not isinstance(payload.get("results", []), list):
             raise OsError("OS Places returned invalid results")
         candidates = [
@@ -221,7 +209,7 @@ class OsClient:
             }
             found: dict[str, Building] = {}
             for features in self._pages(
-                f"{self.ngd_url}/collections/{collection}/items", params, "features"
+                f"{NGD_URL}/collections/{collection}/items", params, "features"
             ):
                 for feature in features:
                     try:

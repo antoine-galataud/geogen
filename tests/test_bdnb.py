@@ -11,6 +11,7 @@ from geogen.bdnb import (
     BdnbClient,
     BdnbError,
     BuildingGroup,
+    building_group_from_row,
     unknown_column,
     unknown_table,
 )
@@ -247,15 +248,20 @@ def test_the_glazing_is_read_from_the_dpe_when_the_percentage_is_missing(
 
 
 @responses.activate
-def test_the_dpe_is_not_read_when_the_percentage_is_known(
+def test_thermal_data_is_requested_even_when_the_glazing_percentage_is_known(
     client: BdnbClient, building_row: dict
 ) -> None:
     responses.get(f"{BASE_URL}/donnees/batiment_groupe_complet", json=[building_row])
+    responses.get(
+        f"{BASE_URL}/donnees/batiment_groupe_dpe_representatif_logement",
+        json=[{"u_mur_exterieur": 0.4}],
+    )
     responses.get(f"{BASE_URL}/donnees/batiment_groupe_wall_dict", json=[])
 
-    client.building_group("bdnb-0001")
+    group = client.building_group("bdnb-0001")
 
-    assert not any("dpe_representatif_logement" in call.request.url for call in responses.calls)
+    assert group.wall_u_value == 0.4
+    assert "u_mur_exterieur" in responses.calls[1].request.url
 
 
 @responses.activate
@@ -294,6 +300,10 @@ def test_explicit_null_classifications_are_preserved(
         type_vitrage=None,
     )
     responses.get(f"{BASE_URL}/donnees/batiment_groupe_complet", json=[published])
+    responses.get(
+        f"{BASE_URL}/donnees/batiment_groupe_dpe_representatif_logement",
+        json=[{"u_mur_exterieur": 0.4, "type_isolation_mur_exterieur": "ITI"}],
+    )
     responses.get(f"{BASE_URL}/donnees/batiment_groupe_wall_dict", json=[])
 
     building = client.building_group("bdnb-0001")
@@ -303,7 +313,7 @@ def test_explicit_null_classifications_are_preserved(
     assert building.upper_floor_insulation is None
     assert building.lower_floor_insulation is None
     assert building.glazing_type is None
-    assert not any("dpe_representatif_logement" in call.request.url for call in responses.calls)
+    assert building.wall_u_value == 0.4
 
 
 @responses.activate
@@ -351,7 +361,11 @@ def test_the_roof_material_is_read_from_its_own_table(
 
     assert building is not None
     assert building.roof_material == "Ardoises"
-    ffo_call = responses.calls[1].request.url
+    ffo_call = next(
+        call.request.url
+        for call in responses.calls
+        if "batiment_groupe_ffo_bat" in call.request.url
+    )
     assert "mat_toit_txt" in ffo_call
     assert not any(
         "batiment_groupe_synthese_enveloppe" in call.request.url for call in responses.calls
@@ -447,11 +461,11 @@ def test_the_code_of_a_building_group_is_its_identifier() -> None:
 
 
 def test_the_code_falls_back_on_the_building_when_it_has_no_group() -> None:
-    building = BuildingGroup.from_row({"batiment_groupe_id": None, "rnb_id": "AB12CD34EF56"})
+    building = building_group_from_row({"batiment_groupe_id": None, "rnb_id": "AB12CD34EF56"})
 
     assert building.batiment_construction_id == "AB12CD34EF56"
     assert building.code == "AB12CD34EF56"
 
 
 def test_a_building_group_without_any_code() -> None:
-    assert BuildingGroup.from_row({}).code == ""
+    assert building_group_from_row({}).code == ""

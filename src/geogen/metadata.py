@@ -47,6 +47,18 @@ def building_metadata(building: Building) -> dict[str, Any]:
         "roof_material": building.roof_material,
         "roof_type": building.roof_type,
         "roof_shape": building.roof_shape,
+        "thermal_properties": {
+            "scope": (
+                "representative_dpe_not_face_measurements"
+                if building.provider == "bdnb"
+                else "provider_building_not_face_measurements"
+            ),
+            "wall_u_value_w_m2k": building.wall_u_value,
+            "upper_floor_u_value_w_m2k": building.roof_u_value,
+            "lower_floor_raw_u_value_w_m2k": building.floor_u_value,
+            "window_uw_w_m2k": building.window_u_value,
+            "window_solar_factor": building.window_solar_factor,
+        },
     }
     if isinstance(building, BuildingGroup):
         data["bdnb_id"] = building.code
@@ -88,16 +100,6 @@ def building_description(building: Building) -> str:
         text = details[0] if len(details) == 1 else ", ".join(details[:-1]) + f", and {details[-1]}"
         description += f", with {text}"
     return description + "."
-
-
-def building_group_metadata(group: Building) -> dict[str, Any]:
-    """Backward-compatible name for :func:`building_metadata`."""
-    return building_metadata(group)
-
-
-def building_group_description(group: Building) -> str:
-    """Backward-compatible name for :func:`building_description`."""
-    return building_description(group)
 
 
 def portfolio_metadata(

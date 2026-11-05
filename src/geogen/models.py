@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Protocol
+from typing import Any, ClassVar
 
 NOT_PROVIDED = "not provided"
 
@@ -59,6 +59,16 @@ class Building:
     glazing_type: str | None = NOT_PROVIDED
     #: Exterior walls of the building group, as described by ``wall_dict``.
     walls: tuple[Any, ...] = ()
+    #: Representative-DPE transmittances (W/m²-K), not individual face measurements.
+    wall_u_value: float | None = None
+    #: Upper heat-loss floor/ceiling U; mapping this onto a roof is an approximation.
+    roof_u_value: float | None = None
+    #: Lower-floor U before ground-contact attenuation.
+    floor_u_value: float | None = None
+    #: Window Uw, excluding shutters/closures (not Ujn).
+    window_u_value: float | None = None
+    #: Representative-DPE window solar factor, a fraction in [0, 1].
+    window_solar_factor: float | None = None
 
 
 @dataclass(frozen=True)
@@ -67,15 +77,13 @@ class Address:
 
     cle_interop_adr: str
     label: str | None = None
-    code_commune_insee: str | None = None
 
 
 @dataclass(frozen=True)
 class BuildingGroup(Building):
     """BDNB building group (or standalone construction) with shared attributes.
 
-    An unspecified CRS preserves BDNB's historical coordinate auto-detection. The provider
-    adapter resolves it before returning normalized buildings.
+    The provider adapter resolves an unspecified CRS before returning buildings.
     """
 
     code: str = field(init=False)
@@ -88,13 +96,6 @@ class BuildingGroup(Building):
         object.__setattr__(
             self, "code", self.batiment_groupe_id or self.batiment_construction_id or ""
         )
-
-    @classmethod
-    def from_row(cls, row: dict[str, Any]) -> BuildingGroup:
-        """Compatibility factory; BDNB schema parsing stays in the provider."""
-        from geogen.bdnb import building_group_from_row
-
-        return building_group_from_row(row, building_class=cls)
 
 
 @dataclass(frozen=True)
@@ -109,8 +110,3 @@ class OsBuilding(Building):
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "code", f"os-{self.os_id}")
-
-
-class BuildingProvider(Protocol):
-    def buildings_for_address(self, query: str, *, max_buildings: int = 10) -> list[Building]: ...
-    def close(self) -> None: ...

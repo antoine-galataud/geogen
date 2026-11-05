@@ -1,6 +1,7 @@
 """Offline OS contract fixtures and full exporter integration tests."""
 
 import json
+from contextlib import closing
 from urllib.parse import parse_qs, urlsplit
 
 import openstudio
@@ -107,7 +108,7 @@ def test_override():
 @responses.activate
 def test_os_request_contract_and_cache():
     register()
-    with OsClient("secret") as client:
+    with closing(OsClient("secret")) as client:
         first = client.buildings_for_address(ADDRESS)
         assert client.buildings_for_address(ADDRESS.lower()) == first
     assert len(responses.calls) == 2
@@ -124,7 +125,7 @@ def test_os_request_contract_and_cache():
 @responses.activate
 def test_neighbour_is_not_selected():
     register(buildings=[feature(offset=100)])
-    with OsClient("secret") as client, pytest.raises(AddressNotFoundError):
+    with closing(OsClient("secret")) as client, pytest.raises(AddressNotFoundError):
         client.buildings_for_address(ADDRESS)
 
 
@@ -136,7 +137,7 @@ def test_pagination_and_building_limit():
         json={"features": [feature()], "links": [{"rel": "next", "href": ITEMS + "?offset=100"}]},
     )
     responses.get(ITEMS + "?offset=100", json={"features": [feature("second")]})
-    with OsClient("secret") as client:
+    with closing(OsClient("secret")) as client:
         assert len(client.buildings_for_address(ADDRESS, max_buildings=1)) == 1
         assert len(client.buildings_for_address(ADDRESS, max_buildings=5)) == 2
     assert len(responses.calls) == 3
@@ -147,7 +148,7 @@ def test_ambiguous_places_result():
     responses.get(
         f"{PLACES_URL}/find", json={"results": [{"DPA": address()}, {"DPA": address("200")}]}
     )
-    with OsClient("secret") as client, pytest.raises(OsError, match="Ambiguous"):
+    with closing(OsClient("secret")) as client, pytest.raises(OsError, match="Ambiguous"):
         client.buildings_for_address(ADDRESS)
     assert len(responses.calls) == 1
 
@@ -156,7 +157,7 @@ def test_ambiguous_places_result():
 @responses.activate
 def test_api_errors(status):
     responses.get(f"{PLACES_URL}/find", status=status)
-    with OsClient("secret") as client, pytest.raises(OsError, match=str(status)) as error:
+    with closing(OsClient("secret")) as client, pytest.raises(OsError, match=str(status)) as error:
         client.buildings_for_address(ADDRESS)
     assert "secret" not in str(error.value)
 
@@ -177,11 +178,11 @@ def test_normalization_and_fallbacks():
     assert building.height == 12
     assert building.storeys is None
     assert building.roof_shape == "flat"  # avoid double-counting the roof
-    assert footprints_from_group(building)[0].storeys == 4
+    assert footprints_from_group(building, crs="EPSG:27700")[0].storeys == 4
 
 
 def test_bng_dimensions_and_site_location():
-    footprints = footprints_from_group(building_from_feature(feature()))
+    footprints = footprints_from_group(building_from_feature(feature()), crs="EPSG:27700")
     model = build_model(footprints)
     assert model.getSite().latitude() == pytest.approx(51.503, abs=0.01)
     assert model.getSite().longitude() == pytest.approx(-0.128, abs=0.01)
@@ -292,7 +293,7 @@ def test_mixed_countries_share_projected_frame(tmp_path, building_row):
 @responses.activate
 def test_out_of_coverage_places_response():
     responses.get(f"{PLACES_URL}/find", json={"results": [{"DPA": address(COUNTRY_CODE="N")}]})
-    with OsClient("secret") as client, pytest.raises(OsError, match="Great Britain"):
+    with closing(OsClient("secret")) as client, pytest.raises(OsError, match="Great Britain"):
         client.buildings_for_address("Belfast")
     assert len(responses.calls) == 1
 
@@ -300,7 +301,7 @@ def test_out_of_coverage_places_response():
 @responses.activate
 def test_bad_json():
     responses.get(f"{PLACES_URL}/find", body="not json")
-    with OsClient("secret") as client, pytest.raises(OsError, match="invalid JSON"):
+    with closing(OsClient("secret")) as client, pytest.raises(OsError, match="invalid JSON"):
         client.buildings_for_address(ADDRESS)
 
 
@@ -314,7 +315,7 @@ def test_pagination_cannot_forward_key_to_another_origin():
             "links": [{"rel": "next", "href": "https://example.com/items"}],
         },
     )
-    with OsClient("secret") as client, pytest.raises(OsError, match="pagination"):
+    with closing(OsClient("secret")) as client, pytest.raises(OsError, match="pagination"):
         client.buildings_for_address(ADDRESS)
     assert len(responses.calls) == 2
 
@@ -329,7 +330,7 @@ def test_multipolygon_and_pitched_roof():
         ],
     }
     raw["properties"]["roofshapeaspect_shape"] = "Pitched"
-    footprints = footprints_from_group(building_from_feature(raw))
+    footprints = footprints_from_group(building_from_feature(raw), crs="EPSG:27700")
     assert len(footprints) == 2
     model = build_model(footprints)
     assert len(model.getSpaces()) == 8  # three floors and attic per polygon

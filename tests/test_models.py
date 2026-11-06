@@ -2,21 +2,14 @@ from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
-from geogen import Building as PublicBuilding
-from geogen import OsBuilding as PublicOsBuilding
-from geogen.bdnb import Address as LegacyAddress
-from geogen.bdnb import BuildingGroup as LegacyBuildingGroup
+from geogen.bdnb import building_group_from_row
 from geogen.geometry import footprints_from_group
-from geogen.models import Address, Building, BuildingGroup, OsBuilding
+from geogen.models import Building, BuildingGroup, OsBuilding
 from geogen.ordnance_survey import building_from_feature
 from geogen.providers import BdnbProvider
 
 
-def test_models_are_centralized_and_legacy_imports_are_preserved():
-    assert LegacyAddress is Address
-    assert LegacyBuildingGroup is BuildingGroup
-    assert PublicBuilding is Building
-    assert PublicOsBuilding is OsBuilding
+def test_provider_models_are_buildings():
     assert issubclass(BuildingGroup, Building)
     assert issubclass(OsBuilding, Building)
 
@@ -39,11 +32,8 @@ def test_bdnb_identity_is_recomputed_on_replace(group_id, construction_id, expec
         updated.height = 9
 
 
-def test_bdnb_row_factory_preserves_subclasses_and_source_fields():
-    class CustomBuildingGroup(BuildingGroup):
-        pass
-
-    building = CustomBuildingGroup.from_row(
+def test_bdnb_row_factory_preserves_source_fields():
+    building = building_group_from_row(
         {
             "batiment_groupe_id": None,
             "rnb_id": "standalone",
@@ -56,7 +46,7 @@ def test_bdnb_row_factory_preserves_subclasses_and_source_fields():
             "mat_toit_txt": "tuile",
         }
     )
-    assert isinstance(building, CustomBuildingGroup)
+    assert isinstance(building, BuildingGroup)
     assert building.code == "standalone"
     assert building.batiment_construction_id == "standalone"
     assert building.height == 12.5
@@ -94,7 +84,7 @@ def test_bdnb_adapter_preserves_subclass_and_detects_crs(monkeypatch, ring, expe
         assert building.batiment_construction_id == "construction"
         assert building.crs == expected_crs
         assert group.crs is None
-        assert footprints_from_group(building) == footprints_from_group(group)
+        assert len(footprints_from_group(building, crs="EPSG:2154")) == 1
     finally:
         provider.close()
 

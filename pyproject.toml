@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "geogen"
-version = "0.3.0"
+version = "0.4.0"
 description = "Generate OpenStudio and EnergyPlus geometry from French and British building data"
 authors = ["Antoine Galataud", "Davide Coraci"]
 readme = "README.md"
@@ -13,6 +13,7 @@ requests = ">=2.32,<3.0"
 click = ">=8.1,<9.0"
 shapely = ">=2.0,<3.0"
 pyproj = ">=3.6,<4.0"
+laspy = {version = ">=2.5,<3.0", extras = ["lazrs"]}
 
 [tool.poetry.scripts]
 geogen = "geogen.cli:main"

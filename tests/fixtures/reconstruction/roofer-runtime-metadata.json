@@ -1,0 +1,40 @@
+{
+  "fixture": "roofer-box-courtyard.city.jsonl",
+  "sha256": "35242459c88e3b180f18eb9b4adfccd901304b7d63643471d003afa95ae389a2",
+  "provenance": "Unedited, real output captured before implementing the parser; generated from synthetic classified points, not an IGN benchmark.",
+  "image": "3dgi/3dbag-pipeline-tools@sha256:055d02c5ea9ed23945e2f96725a1637e0d9fc66c68b78b92148ce953ba8c22c5",
+  "roofer_version": "roofer c9f272f (dirty, 2025-12-03 17:42:21 +0000)",
+  "date": "2026-10-22",
+  "command": ["roofer", "-j", "2", "--id-attribute", "reconstruction_id", "--srs", "EPSG:2154", "--lod12", "--lod22", "--no-clip-terrain", "--h-terrain-strategy", "buffer_user", "--h-terrain-attribute", "ground_elevation", "/work/input.laz", "/work/outlines.geojson", "/work/output"],
+  "input": {
+    "crs": "EPSG:2154",
+    "las_version": "1.2",
+    "point_format": 3,
+    "point_count": 6000,
+    "grid_spacing_m": 0.5,
+    "grid_x_start": 699995.25,
+    "grid_x_stop_exclusive": 700045,
+    "grid_y_start": 6599995.25,
+    "grid_y_stop_exclusive": 6600025,
+    "roof_class": 6,
+    "roof_elevation_m": 110,
+    "ground_class": 2,
+    "ground_elevation_m": 100,
+    "box_outline": [[700000,6600000],[700010,6600000],[700010,6600010],[700000,6600010]],
+    "courtyard_outline": [[700020,6600000],[700040,6600000],[700040,6600020],[700020,6600020]],
+    "courtyard_hole": [[700026,6600006],[700026,6600014],[700034,6600014],[700034,6600006]],
+    "classification_rule": "Points strictly inside a polygon but outside its holes are roofs; all remaining grid points are ground."
+  },
+  "independent_validation": {
+    "command": ["val3dity", "/work/output/700000_6600000.city.jsonl", "--report", "/work/validation.json"],
+    "version": "2.4.0",
+    "validity": true,
+    "valid_features": 2,
+    "valid_solids": 4,
+    "valid_multisurfaces": 2,
+    "all_errors": [],
+    "dataset_errors": []
+  },
+  "expected_volume_m3": {"box": 1000, "courtyard": 3360},
+  "limitations": ["Synthetic flat roofs only", "Not reconstruction fidelity evidence for an IGN building", "No benchmark or real-building acceptance claim"]
+}

@@ -2,13 +2,13 @@
 
 [[package]]
 name = "certifi"
-version = "2026.10.19"
+version = "2026.10.23"
 description = "Python package for providing Mozilla's CA Bundle."
 optional = false
 python-versions = ">=3.7"
 files = [
-    {file = "certifi-2026.10.19-py3-none-any.whl", hash = "sha256:42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b"},
-    {file = "certifi-2026.10.19.tar.gz", hash = "sha256:035c1e85572b141bf1c3a3eff0e33a8eb74917522f2559075ff8d2fea780a1ae"},
+    {file = "certifi-2026.10.23-py3-none-any.whl", hash = "sha256:e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1"},
+    {file = "certifi-2026.10.23.tar.gz", hash = "sha256:a9895e6e2758b371e0545e321a3a8fd1fcfd9829ada8824a936dfb16aaaf36cd"},
 ]
 
 [[package]]
@@ -237,6 +237,71 @@ python-versions = ">=3.10"
 files = [
     {file = "iniconfig-2.3.1-py3-none-any.whl", hash = "sha256:9121e2c1fdb355232495be3194c8dfe87ccc2d5dee45947b78e68f499790d7a7"},
     {file = "iniconfig-2.3.1.tar.gz", hash = "sha256:67f4b9c50da0dedf52af349e7749a80a9057a5031199791b906c3bb3ae878960"},
+]
+
+[[package]]
+name = "laspy"
+version = "2.7.0"
+description = "Native Python ASPRS LAS read/write library"
+optional = false
+python-versions = ">=3.10"
+files = [
+    {file = "laspy-2.7.0-py3-none-any.whl", hash = "sha256:15f5344c62a1023461996bdf5d1ba5fdd813e96694a524fee712931134f3792f"},
+    {file = "laspy-2.7.0.tar.gz", hash = "sha256:f56feb5445e75d6ff12ee814aab6a35339290e75264ff277c6bf553f3025a3f5"},
+]
+
+[package.dependencies]
+lazrs = {version = ">=0.8.0,<0.9.0", optional = true, markers = "extra == \"lazrs\""}
+numpy = "*"
+
+[package.extras]
+cli = ["rich (>=10.11.0)", "typer (>=0.16.0)"]
+dev = ["coverage", "m2r2", "nox", "pytest", "pytest-benchmark", "rangehttpserver", "sphinx", "sphinx-rtd-theme"]
+laszip = ["laszip (>=0.3.0,<0.4.0)"]
+lazrs = ["lazrs (>=0.8.0,<0.9.0)"]
+pyproj = ["pyproj"]
+requests = ["requests"]
+
+[[package]]
+name = "lazrs"
+version = "0.8.2"
+description = ""
+optional = false
+python-versions = "*"
+files = [
+    {file = "lazrs-0.8.2-cp310-cp310-macosx_10_12_x86_64.whl", hash = "sha256:f1ba34261454e2a4f7fdee097d75130e65295e297dfc062c7c338c182a47ed32"},
+    {file = "lazrs-0.8.2-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:a2ba9aee41c21151d53ec2639df33158ec9b15cea1a209da984292478543cab2"},
+    {file = "lazrs-0.8.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:1aa53430e60fee9a5c3c927ec3343b9ea9c1c00647b3a586406ec89561a530d7"},
+    {file = "lazrs-0.8.2-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:29a48ae7aa6e86a1fd8587c205ac8def7ecf93eed8dbd6704d806dfb3b1a355e"},
+    {file = "lazrs-0.8.2-cp310-cp310-win32.whl", hash = "sha256:d87b90cfdc380be5251c8438540d73e8c5260ed97d00514e521e110965f0cd73"},
+    {file = "lazrs-0.8.2-cp310-cp310-win_amd64.whl", hash = "sha256:e16f7245f59721b3e139a97fd7432bd7a590a549310c9e8074a8e768740863d2"},
+    {file = "lazrs-0.8.2-cp311-cp311-macosx_10_12_x86_64.whl", hash = "sha256:ddeea17cd291fbf5e6a18e24440d25a7389d5a4cc3930466421a688464f5f188"},
+    {file = "lazrs-0.8.2-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:b5029d4a889f0a2eafc76857c37f9bb96dd223addd3e252339b66e88f9a0178f"},
+    {file = "lazrs-0.8.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:fec70f58e6c4193f3816ec55a51bd3de4c7f2010572e880f8fcaae8eccd0a563"},
+    {file = "lazrs-0.8.2-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:34d84a4e5874c03b986e7b69b1c972c5dfe023537a1ac4c198e3012f0042bb0a"},
+    {file = "lazrs-0.8.2-cp311-cp311-win32.whl", hash = "sha256:de20b66623bfcfd390112a4f43a2840405b1a4005bbaf512d1abe45d02845741"},
+    {file = "lazrs-0.8.2-cp311-cp311-win_amd64.whl", hash = "sha256:29e49fb839ee82f014495cf79bb43559b64696b3440db878e340b4aab0b53df9"},
+    {file = "lazrs-0.8.2-cp312-cp312-macosx_10_12_x86_64.whl", hash = "sha256:99ea3de5796d6c651d23ee0b130ad55477c49939cfc7a371f2f23cd1945db762"},
+    {file = "lazrs-0.8.2-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:7b6d4680a75cf0b8594cbec3e4c0db1c839f78876750eeffdfbbb6684a487746"},
+    {file = "lazrs-0.8.2-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:237bdb78596dc0a2f7a953833787d7cb65da39025723caa922bb81e2a1391224"},
+    {file = "lazrs-0.8.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:9e7d82b5ea4cb0e503970a619fb792dbbcdcb2cd8c3adf9c08fab3405abc8e60"},
+    {file = "lazrs-0.8.2-cp312-cp312-win32.whl", hash = "sha256:ad1dd71a70f3e93f2e9f52bad8cfddf981bde3245a9819d62a6af6fed60a23e8"},
+    {file = "lazrs-0.8.2-cp312-cp312-win_amd64.whl", hash = "sha256:213803fbaaf734d5ff3c886bb4a2d173ea24a31383c3cda5383b9bc16e8f0635"},
+    {file = "lazrs-0.8.2-cp313-cp313-macosx_10_12_x86_64.whl", hash = "sha256:d9d16f33fefee7642894cf4735e29f0f693f74d26f8c6a822d60982d26900e09"},
+    {file = "lazrs-0.8.2-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:014805e852a1dfd7d53d55561fb6c331ba59aacfc9a4832b4d9f936c8552753a"},
+    {file = "lazrs-0.8.2-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:6907aa7f277ead6572a8d72f0ab0ebe9e23ae79960a0f3676fc50144d0fb7a0b"},
+    {file = "lazrs-0.8.2-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:4b7b5de291b1c6892bda5a3cec6a06ab582ed5bff513066cc3ba947ae1739a87"},
+    {file = "lazrs-0.8.2-cp313-cp313-win32.whl", hash = "sha256:21aa211d20a80729564b40f8c56d01d1f150332e29bac50270800839af0b45da"},
+    {file = "lazrs-0.8.2-cp313-cp313-win_amd64.whl", hash = "sha256:f76330be981c0385841e3d11428c7808b3527c0e762b6e664b5c446c3477d6bd"},
+    {file = "lazrs-0.8.2-cp314-cp314-macosx_10_12_x86_64.whl", hash = "sha256:c62115d323a2985682cf0c8a7d5154dde00ecd09803e1df077eefe2a6cbc13ee"},
+    {file = "lazrs-0.8.2-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:a7f5fd1ec5b56901344fafba9ffb6fb26754445e2bbdcb2dfbbc492b82924924"},
+    {file = "lazrs-0.8.2-cp314-cp314-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:40806a2dcac89560fb41936c87ec0ab5ecda95c9622b141e9bfd1d70c6e5438c"},
+    {file = "lazrs-0.8.2-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f481e27206db60e3f9d1d057c37d4c2ecc6e2af21e4c6b60b3a9fa347062aa50"},
+    {file = "lazrs-0.8.2-cp314-cp314-win32.whl", hash = "sha256:e852e87af20972d8b685855ebd41bcd1b600dc5fa78ee4810dbfe920669e91e4"},
+    {file = "lazrs-0.8.2-cp314-cp314-win_amd64.whl", hash = "sha256:dd5a462888178d5cbaa2dd30b1b2d99f164c0254791c987d2f47081229e92fb3"},
+    {file = "lazrs-0.8.2-cp39-cp39-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:7f4ee04e43f80b37e5e94b021338e2839a68d87fa43dd4c6527c3d8d3d0e31fd"},
+    {file = "lazrs-0.8.2-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f5da9dde39b5c353b40662a0b504897e3e5aa33b906665de02879270c3813c7f"},
+    {file = "lazrs-0.8.2.tar.gz", hash = "sha256:80a30ad1798a9fd58e84f238ca23f5002555ba16553e2afedafa6bde494229e2"},
 ]
 
 [[package]]
@@ -676,4 +741,4 @@ zstd = ["backports-zstd (>=1.0.0)"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.12,<3.13"
-content-hash = "3e35922ed9eb8d0ef97c986dafa0df37e88da2638f760e50a291939c5249564f"
+content-hash = "6b23b92bb6a74722263fe784a9f5b49dbb1e616df17cd21465f79f7f93de0526"

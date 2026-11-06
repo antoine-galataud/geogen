@@ -241,7 +241,7 @@ def test_two_pdal_readers_have_explicit_merge_and_original_class_artifact():
         metadata={"geometry": mapping(box(651000, 6860000, 652000, 6861000))},
     )
     stages = build_pdal_pipeline(
-        [tile(), second], (650000, 6860000, 650010, 6860010), "crop.original.laz"
+        [tile(), second], (650995, 6860000, 651005, 6860010), "crop.original.laz"
     )["pipeline"]
     assert stages[2]["type"] == "filters.merge"
     assert stages[2]["inputs"] == ["tile_0", "tile_1"]
@@ -299,6 +299,24 @@ def test_tile_footprint_union_must_cover_complete_crop_and_preserve_holes():
     )
     with pytest.raises(IgnError, match="does not cover"):
         validate_acquisition([first], (650001, 6860001, 650010, 6860010))
+
+
+def test_tiles_outside_the_extent_are_dropped_before_the_mission_check():
+    from geogen.reconstruction.ign import validate_acquisition
+    first = tile()
+    # IGN's WFS also returns the next tile row, of another mission, 12 m beyond the extent.
+    north = tile(
+        id="metadata.2", coordonnees_nw="0650-6862", url=TILE.replace("tile.", "other."),
+        acquisition_epoch="22LHD1IC",
+        metadata={"geometry": mapping(box(650000, 6861000.0046, 651000, 6862000.0046))},
+    )
+    assert validate_acquisition([first, north], (650001, 6860950, 650010, 6860988)) == (first,)
+    assert build_pdal_pipeline(
+        [first, north], (650001, 6860950, 650010, 6860988), "crop.laz"
+    )["pipeline"][0]["filename"] == copc_url(TILE)
+    with pytest.raises(IgnError) as caught:
+        validate_acquisition([first, north], (650001, 6860950, 650010, 6861010))
+    assert caught.value.code == "acquisition_epoch_conflict"
 
 
 def header_bytes(crs):

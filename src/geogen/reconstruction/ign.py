@@ -117,7 +117,7 @@ def validate_acquisition(
         raise IgnError("no_coverage", "No LiDAR tile intersects the requested extraction extent")
     if len(tiles) > MAX_TILES:
         raise IgnError("tile_limit", "LiDAR acquisition exceeds the safe limit of 32 tiles")
-    epochs = set()
+    epochs = []
     tile_epochs: dict[str, tuple[str, str, str]] = {}
     urls, identifiers, footprints = set(), set(), []
     footprint_hashes = set()
@@ -128,7 +128,7 @@ def validate_acquisition(
         epoch = str(tile.get("acquisition_epoch") or "")
         if not epoch:
             raise IgnError("missing_acquisition_epoch", "LiDAR acquisition epoch is not documented")
-        epochs.add(epoch)
+        epochs.append(epoch)
         key = str(tile.get("coordonnees_nw") or tile.get("id") or tile["url"])
         interval = (epoch, str(tile.get("date_debut_acquisition") or ""),
                     str(tile.get("date_fin_acquisition") or ""))
@@ -155,14 +155,23 @@ def validate_acquisition(
                 raise IgnError("duplicate_tile", "LiDAR tile inventory contains a duplicate footprint")
             footprint_hashes.add(fingerprint)
             footprints.append(geometry)
-    if len(epochs) != 1:
+    if bounds is not None:
+        # The WFS bbox filter also returns neighbouring tiles whose footprint stays
+        # outside the extent; they hold no requested points and are not read.
+        requested = box(*checked_bounds(bounds))
+        overlapping = [
+            i for i, footprint in enumerate(footprints) if footprint.intersection(requested).area > 0
+        ]
+        if not overlapping:
+            raise IgnError("no_coverage", "No LiDAR tile intersects the requested extraction extent")
+        tiles = tuple(tiles[i] for i in overlapping)
+        footprints = [footprints[i] for i in overlapping]
+        epochs = [epochs[i] for i in overlapping]
+    if len(set(epochs)) != 1:
         raise IgnError("acquisition_epoch_conflict", "Mixing LiDAR acquisition missions is not supported")
     # IGN's reprojected metadata edges differ from their kilometre grid by millimetres.
     if bounds is not None:
         coverage = unary_union(footprints).buffer(.02)
-        requested = box(*checked_bounds(bounds))
-        if coverage.intersection(requested).area == 0:
-            raise IgnError("no_coverage", "No LiDAR tile intersects the requested extraction extent")
         if not coverage.covers(requested):
             raise IgnError("tile_coverage_incomplete", "LiDAR tile footprint union does not cover the extraction bounds")
     return tiles

@@ -494,6 +494,13 @@ def reconstruct_manifest(
             result["outline_trim"] = trims[unit.reconstruction_id]
             result["requires_review"] = True
             result["reason_codes"].append("overlapping_outline_trimmed")
+        if unit.reconstruction_id in report.get("lidar_missions", {}).get("straddling_targets", []):
+            result["requires_review"] = True
+            result["reason_codes"].append("mixed_lidar_missions")
+            result["assumptions"].append(
+                "points_from_lidar_missions_"
+                f"{report['lidar_missions']['acquisition_span_days']}_days_apart"
+            )
         ground = report["ground_references"][unit.reconstruction_id]
         if ground["expanded_search"]:
             result["requires_review"] = True

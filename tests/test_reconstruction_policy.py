@@ -146,6 +146,23 @@ def test_unmodeled_context_contact_is_a_reported_boundary_assumption(reconstruct
     assert "unmodeled_context_contact_treated_as_exterior_geometry" in box["assumptions"]
 
 
+def test_targets_on_mixed_lidar_missions_are_flagged_for_review(reconstruction):
+    run, runtime, manifest, evidence, reports = reconstruction
+    first, second = (unit["reconstruction_id"] for unit in manifest["units"][:2])
+    manifest["lidar_missions"] = {
+        "missions": ["22LHD1IC", "22LHD1ID"], "selected_missions": ["22LHD1IC", "22LHD1ID"],
+        "mixed_missions": True, "acquisition_span_days": 2, "straddling_targets": [first],
+    }
+    run()
+    report = reports[-1]
+    assert report["lidar_missions"]["straddling_targets"] == [first]
+    units = {unit["reconstruction_id"]: unit for unit in report["units"]}
+    assert units[first]["requires_review"]
+    assert "mixed_lidar_missions" in units[first]["reason_codes"]
+    assert "points_from_lidar_missions_2_days_apart" in units[first]["assumptions"]
+    assert "mixed_lidar_missions" not in units[second]["reason_codes"]
+
+
 def test_cli_exports_reviewed_geometry_without_thermal_inputs(
     reconstruction, monkeypatch, tmp_path
 ):

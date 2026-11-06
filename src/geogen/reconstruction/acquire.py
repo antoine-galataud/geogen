@@ -76,7 +76,8 @@ def acquire(buildings, request, options, work: Path, runtime) -> Path:
         )
         # Context neighbours are only used as outlines; points are needed on the
         # targets and in their ground search rings, which may be far apart.
-        footprint = unary_union([from_wkt(u.working_wkt) for u in units if u.role == "target"])
+        targets = {u.reconstruction_id: from_wkt(u.working_wkt) for u in units if u.role == "target"}
+        footprint = unary_union(list(targets.values()))
         xmin, ymin, xmax, ymax = footprint.bounds
         acquisition_buffer = GROUND_SEARCH_RADIUS
         extraction = footprint.buffer(acquisition_buffer)
@@ -88,8 +89,8 @@ def acquire(buildings, request, options, work: Path, runtime) -> Path:
                 ymax + acquisition_buffer,
             )
         )
-        # Only the mission under the targets is read; its edge may clip the ring.
-        tile_snapshot = ign.tiles(bounds, region=extraction, targets=footprint)
+        # Only the missions under the targets are read; their edge may clip the ring.
+        tile_snapshot = ign.tiles(bounds, region=extraction, targets=targets)
         extraction = from_wkt(tile_snapshot["extraction_wkt"])
         write_json(work / "tiles.json", tile_snapshot)
         header_provenance = ign.verify_tile_headers(tile_snapshot)

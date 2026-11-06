@@ -7,6 +7,7 @@ import requests
 import responses
 from shapely import from_wkt as shape_from_wkt
 from shapely.geometry import MultiPolygon, Polygon, box, mapping, shape
+from shapely.ops import unary_union
 
 from geogen.bdnb import RELATIONSHIP_TABLES, BdnbClient, BdnbError, building_group_from_row
 from geogen.models import BuildingGroup
@@ -348,7 +349,8 @@ def test_only_the_mission_under_the_targets_is_read_and_clips_the_ground_ring():
     assert kept == (first,)
     assert clipped.bounds[3] == pytest.approx(6933000.0146)
     assert clipped.covers(targets) and ring.buffer(1e-6).covers(clipped)
-    assert selection["selected_mission"] == "22LHDKE"
+    assert selection["selected_missions"] == ["22LHDKE"]
+    assert "mixed_missions" not in selection
     assert selection["excluded_tiles"] == ["0563-6934"]
     assert selection["excluded_area_m2"] == pytest.approx(ring.area - clipped.area)
     stages = build_pdal_pipeline(kept, bounds, "crop.laz", polygon=clipped)["pipeline"]
@@ -362,9 +364,69 @@ def test_only_the_mission_under_the_targets_is_read_and_clips_the_ground_ring():
     )
     assert single == (first,) and region.equals(inner.buffer(10))
     assert record == {"missions": ["22LHDKE"]}
+    # Without documented acquisition dates, straddled missions are not mixed.
     with pytest.raises(IgnError) as straddling:
         select_mission([first, north], bounds, ring, box(563499.8, 6932995, 563514.4, 6933005))
     assert straddling.value.code == "acquisition_epoch_conflict"
+
+
+def boquettier_tiles(north_dates):
+    south = Polygon([
+        (563000.00010998, 6933000.0045928), (564000.00010917, 6933000.00459281),
+        (564000.00010917, 6932000.00459343), (563000.00010997, 6932000.00459342),
+    ])
+    north = Polygon([
+        (563000.00010998, 6934000.00459219), (564000.00010918, 6934000.00459219),
+        (564000.00010917, 6933000.00459281), (563000.00010998, 6933000.0045928),
+    ])
+    return [
+        tile(
+            coordonnees_nw="0563-6933", acquisition_epoch="22LHD1ID",
+            date_debut_acquisition="2023-05-19Z", date_fin_acquisition="2023-05-19Z",
+            metadata={"geometry": mapping(south)},
+        ),
+        tile(
+            id="metadata.2", coordonnees_nw="0563-6934", url=TILE.replace("tile.", "other."),
+            acquisition_epoch="22LHD1IC", metadata={"geometry": mapping(north)},
+            date_debut_acquisition=north_dates[0], date_fin_acquisition=north_dates[1],
+        ),
+    ]
+
+
+def test_a_target_straddling_missions_flown_within_a_month_mixes_them():
+    from geogen.reconstruction.ign import select_mission
+    # 315 Rue du Boquettier straddles the edge between two missions flown two days apart.
+    tiles = boquettier_tiles(("2023-05-17Z", "2023-05-17Z"))
+    straddling = box(563270, 6932998.2, 563287.1, 6933008.7)
+    inside = box(563300, 6932950, 563310, 6932960)
+    targets = {"recon-a": straddling, "recon-b": inside}
+    ring = unary_union(list(targets.values())).buffer(10)
+    kept, clipped, record = select_mission(tiles, ring.bounds, ring, targets)
+    assert kept == tuple(tiles)
+    assert clipped.equals(ring)
+    assert record["selected_missions"] == ["22LHD1IC", "22LHD1ID"]
+    assert record["mixed_missions"] is True
+    assert record["acquisition_span_days"] == 2
+    assert record["straddling_targets"] == ["recon-a"]
+    snapshot = {"tiles": list(kept), "mission_selection": record}
+    stages = build_pdal_pipeline(snapshot, ring.bounds, "crop.laz", polygon=clipped)["pipeline"]
+    assert len([s for s in stages if s["type"] == "readers.copc"]) == 2
+    # The mixing allowance is not implied by the tiles alone.
+    with pytest.raises(IgnError) as strict:
+        build_pdal_pipeline(list(kept), ring.bounds, "crop.laz", polygon=clipped)
+    assert strict.value.code == "acquisition_epoch_conflict"
+
+
+@pytest.mark.parametrize("north_dates", [("2023-07-01Z", "2023-07-01Z"), ("", "")])
+def test_missions_far_apart_or_undated_are_not_mixed_under_a_target(north_dates):
+    from geogen.reconstruction.ign import select_mission
+    straddling = box(563270, 6932998.2, 563287.1, 6933008.7)
+    with pytest.raises(IgnError) as caught:
+        select_mission(
+            boquettier_tiles(north_dates), straddling.buffer(10).bounds, straddling.buffer(10),
+            {"recon-a": straddling},
+        )
+    assert caught.value.code == "acquisition_epoch_conflict"
 
 
 def header_bytes(crs):

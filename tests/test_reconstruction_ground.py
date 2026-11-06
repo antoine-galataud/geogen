@@ -178,7 +178,7 @@ def test_acquisition_retains_manifest_and_expands_crop(monkeypatch, tmp_path, of
     unverified = offset > buffer
     (extent, targets), = extents
     assert extent == (X - buffer, Y - buffer, X + 10 + buffer, Y + 10 + buffer)
-    assert targets.equals(box(X, Y, X + 10, Y + 10))
+    assert list(targets) == ["target"] and targets["target"].equals(box(X, Y, X + 10, Y + 10))
     assert manifest["lidar_missions"] == {"missions": ["22LHDKE"]}
     assert manifest["acquisition_buffer_m"] == buffer
     assert crops[0].equals(box(X, Y, X + 10, Y + 10).buffer(buffer))

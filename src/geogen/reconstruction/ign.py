@@ -8,6 +8,7 @@ import json
 import math
 import re
 import struct
+from datetime import date
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import unquote, urlsplit, urlunsplit
@@ -29,6 +30,8 @@ TILE_LAYER = "IGNF_LIDAR-HD_METADONNEE:metadata"
 MAX_EXTENT = 2000.0
 MAX_FEATURES = 2000
 MAX_TILES = 32
+# Flights this close are mixed only under a target that straddles them.
+MAX_MIXED_MISSION_DAYS = 31
 PAGE_SIZE = 500
 NEIGHBORHOOD_BUFFER = 30.0
 
@@ -183,31 +186,60 @@ def _coverage(entries, tolerance=COVERAGE_TOLERANCE):
     return unary_union([footprint for _, _, footprint in entries]).buffer(tolerance)
 
 
+def _acquisition_span_days(entries):
+    """Days from the first to the last acquisition date, or None if undocumented."""
+    days = []
+    for tile, _, _ in entries:
+        for field in ("date_debut_acquisition", "date_fin_acquisition"):
+            try:
+                days.append(date.fromisoformat(str(tile.get(field) or "")[:10]))
+            except ValueError:
+                return None
+    return (max(days) - min(days)).days
+
+
+def _check_missions(entries, mixed):
+    if len({epoch for _, epoch, _ in entries}) == 1:
+        return
+    span = _acquisition_span_days(entries) if mixed else None
+    if span is None or span > MAX_MIXED_MISSION_DAYS:
+        raise IgnError("acquisition_epoch_conflict", "Mixing LiDAR acquisition missions is not supported")
+
+
 def validate_acquisition(
-    tiles: Iterable[dict[str, Any]], bounds=None, region=None,
+    tiles: Iterable[dict[str, Any]], bounds=None, region=None, mixed=False,
 ) -> tuple[dict[str, Any], ...]:
     """Validate one mission's tiles; with an extent, return those overlapping and covering it.
 
     ``region`` is an optional (multi)polygon within ``bounds`` that replaces the
-    bounding box for overlap and coverage checks.
+    bounding box for overlap and coverage checks. ``mixed`` accepts several
+    missions whose documented acquisition dates span at most
+    ``MAX_MIXED_MISSION_DAYS``, as selected by :func:`select_mission`.
     """
     requested = None if bounds is None else _requested_region(bounds, region)
     entries = _inventory(tiles, requested)
-    if len({epoch for _, epoch, _ in entries}) != 1:
-        raise IgnError("acquisition_epoch_conflict", "Mixing LiDAR acquisition missions is not supported")
+    _check_missions(entries, mixed)
     if requested is not None and not _coverage(entries).covers(requested):
         raise IgnError("tile_coverage_incomplete", "LiDAR tile footprint union does not cover the extraction bounds")
     return tuple(tile for tile, _, _ in entries)
 
 
-def select_mission(tiles, bounds, region, targets):
-    """Keep the single acquisition mission under the targets, clipping ``region`` to it.
+def _mixed(tiles):
+    return isinstance(tiles, dict) and bool(tiles.get("mission_selection", {}).get("mixed_missions"))
 
-    Missions are never mixed. Where only the surroundings of the targets (their
-    ground search ring) reach another mission, that part of the extraction is
-    dropped. Targets overlapping several missions fail closed.
+
+def select_mission(tiles, bounds, region, targets):
+    """Keep the acquisition missions under the targets, clipping ``region`` to them.
+
+    ``targets`` is an outline or a mapping of target IDs to outlines. Where only
+    the surroundings of the targets (their ground search ring) reach another
+    mission, that part of the extraction is dropped. A target straddling
+    missions mixes them only if their documented acquisition dates span at most
+    ``MAX_MIXED_MISSION_DAYS``; the record then lists the straddling targets.
     Returns the kept tiles, the clipped region and a provenance record.
     """
+    outlines = dict(targets) if isinstance(targets, dict) else {None: targets}
+    union = unary_union(list(outlines.values()))
     requested = _requested_region(bounds, region)
     entries = _inventory(tiles, requested)
     if not _coverage(entries).covers(requested):
@@ -215,34 +247,41 @@ def select_mission(tiles, bounds, region, targets):
     missions = sorted({epoch for _, epoch, _ in entries})
     if len(missions) == 1:
         return tuple(tile for tile, _, _ in entries), requested, {"missions": missions}
-    under_targets = sorted({
-        epoch for _, epoch, footprint in entries if footprint.intersection(targets).area > 0
-    })
-    if len(under_targets) != 1:
-        raise IgnError(
-            "acquisition_epoch_conflict",
-            "Target buildings span several LiDAR acquisition missions, which are not mixed",
+
+    def under(outline):
+        return {
+            epoch for _, epoch, footprint in entries if footprint.intersection(outline).area > 0
+        }
+
+    selected = sorted(under(union))
+    kept = [entry for entry in entries if entry[1] in selected]
+    record = {"missions": missions, "selected_missions": selected}
+    if len(selected) > 1:
+        span = _acquisition_span_days(kept)
+        if span is None or span > MAX_MIXED_MISSION_DAYS:
+            raise IgnError(
+                "acquisition_epoch_conflict",
+                "Target buildings span LiDAR acquisition missions that are not documented "
+                f"within {MAX_MIXED_MISSION_DAYS} days of each other",
+            )
+        record["mixed_missions"] = True
+        record["acquisition_span_days"] = span
+        record["straddling_targets"] = sorted(
+            target for target, outline in outlines.items()
+            if target is not None and len(under(outline)) > 1
         )
-    mission = under_targets[0]
-    kept = [entry for entry in entries if entry[1] == mission]
     # Half the tolerance keeps the clipped edge strictly inside the coverage check.
     clipped = requested.intersection(_coverage(kept, COVERAGE_TOLERANCE / 2))
     parts = [part for part in getattr(clipped, "geoms", [clipped]) if part.geom_type == "Polygon"]
     clipped = parts[0] if len(parts) == 1 else MultiPolygon(parts)
-    if not clipped.is_valid or not clipped.buffer(1e-6).covers(targets):
-        raise IgnError(
-            "acquisition_epoch_conflict",
-            "Target buildings span several LiDAR acquisition missions, which are not mixed",
-        )
-    return tuple(tile for tile, _, _ in kept), clipped, {
-        "missions": missions,
-        "selected_mission": mission,
-        "excluded_tiles": sorted(
-            str(tile.get("coordonnees_nw") or tile.get("id"))
-            for tile, epoch, _ in entries if epoch != mission
-        ),
-        "excluded_area_m2": requested.area - clipped.area,
-    }
+    if not clipped.is_valid or not clipped.buffer(1e-6).covers(union):
+        raise IgnError("tile_coverage_incomplete", "LiDAR tiles of the selected missions do not cover the targets")
+    record["excluded_tiles"] = sorted(
+        str(tile.get("coordonnees_nw") or tile.get("id"))
+        for tile, epoch, _ in entries if epoch not in selected
+    )
+    record["excluded_area_m2"] = max(0.0, requested.area - clipped.area)
+    return tuple(tile for tile, _, _ in kept), clipped, record
 
 
 class IgnClient:
@@ -296,9 +335,10 @@ class IgnClient:
         """Check each source before merging; read at most 1 MiB of header/VLRs per tile."""
         import laspy
 
+        mixed = _mixed(tiles)
         tiles = tiles["tiles"] if isinstance(tiles, dict) else tiles
         verified = []
-        for tile in validate_acquisition(tiles):
+        for tile in validate_acquisition(tiles, mixed=mixed):
             url = copc_url(tile["url"])
             prefix, first_request = self._header_range(url, 375)
             if prefix[:4] != b"LASF" or prefix[24:26] != bytes((1, 4)):
@@ -464,7 +504,7 @@ class IgnClient:
         return result
 
     def tiles(self, bounds, region=None, targets=None):
-        """List tiles over ``bounds``; with ``targets``, keep the mission under them.
+        """List tiles over ``bounds``; with ``targets``, keep the missions under them.
 
         The selection then records the possibly clipped ``region`` as
         ``extraction_wkt`` and its provenance as ``mission_selection``.
@@ -513,6 +553,7 @@ def build_pdal_pipeline(tiles, bounds, output_path, polygon=None):
     An optional (multi)polygon within ``bounds`` restricts the crop further, so
     that distant parts of a selection do not pull in the points between them.
     """
+    mixed = _mixed(tiles)
     if isinstance(tiles, dict):
         tiles = tiles["tiles"]
     bounds = checked_bounds(bounds)
@@ -531,7 +572,7 @@ def build_pdal_pipeline(tiles, bounds, output_path, polygon=None):
         _requested_region(bounds, shape)
         # A single (multi)polygon keeps filters.crop to one output view.
         region = {"polygon": shape.wkt}
-    tiles = validate_acquisition(tiles, bounds, shape)
+    tiles = validate_acquisition(tiles, bounds, shape, mixed)
     pipeline: list[dict[str, Any]] = [
         {"type": "readers.copc", "filename": copc_url(tile["url"]), "bounds": crop,
          **({"polygon": region["polygon"]} if "polygon" in region else {}),

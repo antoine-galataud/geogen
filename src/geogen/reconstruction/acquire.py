@@ -88,7 +88,9 @@ def acquire(buildings, request, options, work: Path, runtime) -> Path:
                 ymax + acquisition_buffer,
             )
         )
-        tile_snapshot = ign.tiles(bounds)
+        # Only the mission under the targets is read; its edge may clip the ring.
+        tile_snapshot = ign.tiles(bounds, region=extraction, targets=footprint)
+        extraction = from_wkt(tile_snapshot["extraction_wkt"])
         write_json(work / "tiles.json", tile_snapshot)
         header_provenance = ign.verify_tile_headers(tile_snapshot)
         write_json(work / "tile-headers.json", header_provenance)
@@ -124,6 +126,7 @@ def acquire(buildings, request, options, work: Path, runtime) -> Path:
         "frame": asdict(frame),
         "extraction_bounds": list(bounds),
         "acquisition_buffer_m": acquisition_buffer,
+        "lidar_missions": tile_snapshot["mission_selection"],
         "ground_references": ground_diagnostics,
         "frame_origin_z_method": "observed_ground" if ground else "coordinate_origin_only",
         "point_preparation": point_report,

@@ -433,6 +433,8 @@ def reconstruct_manifest(
     working = work / "lidar_working.laz"
     point_report = prepare_points(original, working)
     report["point_preparation"] = point_report
+    if "lidar_missions" in manifest:
+        report["lidar_missions"] = manifest["lidar_missions"]
     report["frame"] = asdict(frame)
     report["target_count"] = len(targets)
     report["context_count"] = len(units) - len(targets)

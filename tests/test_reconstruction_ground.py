@@ -138,9 +138,13 @@ def test_acquisition_retains_manifest_and_expands_crop(monkeypatch, tmp_path, of
     monkeypatch.setattr(IgnClient, "verify_tile_headers", lambda *a: {})
     extents = []
 
-    def tiles(self, bounds):
-        extents.append(bounds)
-        return {"tiles": [{"vertical_reference": "IGN69"}]}
+    def tiles(self, bounds, region=None, targets=None):
+        extents.append((bounds, targets))
+        return {
+            "tiles": [{"vertical_reference": "IGN69"}],
+            "extraction_wkt": region.wkt,
+            "mission_selection": {"missions": ["22LHDKE"]},
+        }
 
     monkeypatch.setattr(IgnClient, "tiles", tiles)
     crops = []
@@ -172,7 +176,10 @@ def test_acquisition_retains_manifest_and_expands_crop(monkeypatch, tmp_path, of
     manifest = load_manifest(path)
     buffer = 10
     unverified = offset > buffer
-    assert extents == [(X - buffer, Y - buffer, X + 10 + buffer, Y + 10 + buffer)]
+    (extent, targets), = extents
+    assert extent == (X - buffer, Y - buffer, X + 10 + buffer, Y + 10 + buffer)
+    assert targets.equals(box(X, Y, X + 10, Y + 10))
+    assert manifest["lidar_missions"] == {"missions": ["22LHDKE"]}
     assert manifest["acquisition_buffer_m"] == buffer
     assert crops[0].equals(box(X, Y, X + 10, Y + 10).buffer(buffer))
     assert manifest["ground_references"]["target"]["status"] == (

@@ -109,17 +109,28 @@ def _vertical(value: Any) -> str:
     raise IgnError("vertical_reference_mismatch", f"Unsupported or missing LiDAR vertical reference: {value!r}")
 
 
-def validate_acquisition(
-    tiles: Iterable[dict[str, Any]], bounds=None,
-) -> tuple[dict[str, Any], ...]:
+def _requested_region(bounds, region=None):
+    requested = box(*checked_bounds(bounds))
+    if region is None:
+        return requested
+    if (
+        region.geom_type not in {"Polygon", "MultiPolygon"} or region.is_empty
+        or not region.is_valid or not requested.buffer(1e-6).covers(region)
+    ):
+        raise IgnError("invalid_extent", "Extraction polygon must be valid and within bounds")
+    return region
+
+
+def _inventory(tiles, requested=None):
+    """Check tile integrity; with an extent, keep tiles overlapping it with their footprint."""
     tiles = tuple(tiles)
     if not tiles:
         raise IgnError("no_coverage", "No LiDAR tile intersects the requested extraction extent")
     if len(tiles) > MAX_TILES:
         raise IgnError("tile_limit", "LiDAR acquisition exceeds the safe limit of 32 tiles")
-    epochs = []
+    entries = []
     tile_epochs: dict[str, tuple[str, str, str]] = {}
-    urls, identifiers, footprints = set(), set(), []
+    urls, identifiers = set(), set()
     footprint_hashes = set()
     for tile in tiles:
         _horizontal(tile.get("horizontal_crs"))
@@ -128,7 +139,6 @@ def validate_acquisition(
         epoch = str(tile.get("acquisition_epoch") or "")
         if not epoch:
             raise IgnError("missing_acquisition_epoch", "LiDAR acquisition epoch is not documented")
-        epochs.append(epoch)
         key = str(tile.get("coordonnees_nw") or tile.get("id") or tile["url"])
         interval = (epoch, str(tile.get("date_debut_acquisition") or ""),
                     str(tile.get("date_fin_acquisition") or ""))
@@ -139,7 +149,8 @@ def validate_acquisition(
         urls.add(url)
         identifiers.add(key)
         tile_epochs[key] = interval
-        if bounds is not None:
+        geometry = None
+        if requested is not None:
             try:
                 geometry = parse_geometry(tile["metadata"]["geometry"])
             except Exception as error:
@@ -154,27 +165,84 @@ def validate_acquisition(
             if fingerprint in footprint_hashes:
                 raise IgnError("duplicate_tile", "LiDAR tile inventory contains a duplicate footprint")
             footprint_hashes.add(fingerprint)
-            footprints.append(geometry)
-    if bounds is not None:
+        entries.append((tile, epoch, geometry))
+    if requested is not None:
         # The WFS bbox filter also returns neighbouring tiles whose footprint stays
         # outside the extent; they hold no requested points and are not read.
-        requested = box(*checked_bounds(bounds))
-        overlapping = [
-            i for i, footprint in enumerate(footprints) if footprint.intersection(requested).area > 0
-        ]
-        if not overlapping:
+        entries = [entry for entry in entries if entry[2].intersection(requested).area > 0]
+        if not entries:
             raise IgnError("no_coverage", "No LiDAR tile intersects the requested extraction extent")
-        tiles = tuple(tiles[i] for i in overlapping)
-        footprints = [footprints[i] for i in overlapping]
-        epochs = [epochs[i] for i in overlapping]
-    if len(set(epochs)) != 1:
+    return entries
+
+
+# IGN's reprojected metadata edges differ from their kilometre grid by millimetres.
+COVERAGE_TOLERANCE = .02
+
+
+def _coverage(entries, tolerance=COVERAGE_TOLERANCE):
+    return unary_union([footprint for _, _, footprint in entries]).buffer(tolerance)
+
+
+def validate_acquisition(
+    tiles: Iterable[dict[str, Any]], bounds=None, region=None,
+) -> tuple[dict[str, Any], ...]:
+    """Validate one mission's tiles; with an extent, return those overlapping and covering it.
+
+    ``region`` is an optional (multi)polygon within ``bounds`` that replaces the
+    bounding box for overlap and coverage checks.
+    """
+    requested = None if bounds is None else _requested_region(bounds, region)
+    entries = _inventory(tiles, requested)
+    if len({epoch for _, epoch, _ in entries}) != 1:
         raise IgnError("acquisition_epoch_conflict", "Mixing LiDAR acquisition missions is not supported")
-    # IGN's reprojected metadata edges differ from their kilometre grid by millimetres.
-    if bounds is not None:
-        coverage = unary_union(footprints).buffer(.02)
-        if not coverage.covers(requested):
-            raise IgnError("tile_coverage_incomplete", "LiDAR tile footprint union does not cover the extraction bounds")
-    return tiles
+    if requested is not None and not _coverage(entries).covers(requested):
+        raise IgnError("tile_coverage_incomplete", "LiDAR tile footprint union does not cover the extraction bounds")
+    return tuple(tile for tile, _, _ in entries)
+
+
+def select_mission(tiles, bounds, region, targets):
+    """Keep the single acquisition mission under the targets, clipping ``region`` to it.
+
+    Missions are never mixed. Where only the surroundings of the targets (their
+    ground search ring) reach another mission, that part of the extraction is
+    dropped. Targets overlapping several missions fail closed.
+    Returns the kept tiles, the clipped region and a provenance record.
+    """
+    requested = _requested_region(bounds, region)
+    entries = _inventory(tiles, requested)
+    if not _coverage(entries).covers(requested):
+        raise IgnError("tile_coverage_incomplete", "LiDAR tile footprint union does not cover the extraction bounds")
+    missions = sorted({epoch for _, epoch, _ in entries})
+    if len(missions) == 1:
+        return tuple(tile for tile, _, _ in entries), requested, {"missions": missions}
+    under_targets = sorted({
+        epoch for _, epoch, footprint in entries if footprint.intersection(targets).area > 0
+    })
+    if len(under_targets) != 1:
+        raise IgnError(
+            "acquisition_epoch_conflict",
+            "Target buildings span several LiDAR acquisition missions, which are not mixed",
+        )
+    mission = under_targets[0]
+    kept = [entry for entry in entries if entry[1] == mission]
+    # Half the tolerance keeps the clipped edge strictly inside the coverage check.
+    clipped = requested.intersection(_coverage(kept, COVERAGE_TOLERANCE / 2))
+    parts = [part for part in getattr(clipped, "geoms", [clipped]) if part.geom_type == "Polygon"]
+    clipped = parts[0] if len(parts) == 1 else MultiPolygon(parts)
+    if not clipped.is_valid or not clipped.buffer(1e-6).covers(targets):
+        raise IgnError(
+            "acquisition_epoch_conflict",
+            "Target buildings span several LiDAR acquisition missions, which are not mixed",
+        )
+    return tuple(tile for tile, _, _ in kept), clipped, {
+        "missions": missions,
+        "selected_mission": mission,
+        "excluded_tiles": sorted(
+            str(tile.get("coordonnees_nw") or tile.get("id"))
+            for tile, epoch, _ in entries if epoch != mission
+        ),
+        "excluded_area_m2": requested.area - clipped.area,
+    }
 
 
 class IgnClient:
@@ -395,7 +463,12 @@ class IgnClient:
         result["query_bounds"] = bounds
         return result
 
-    def tiles(self, bounds):
+    def tiles(self, bounds, region=None, targets=None):
+        """List tiles over ``bounds``; with ``targets``, keep the mission under them.
+
+        The selection then records the possibly clipped ``region`` as
+        ``extraction_wkt`` and its provenance as ``mission_selection``.
+        """
         bounds = checked_bounds(bounds)
         result = self._features(
             TILE_LAYER, {"bbox": ",".join(map(str, bounds)) + ",EPSG:2154"},
@@ -422,7 +495,15 @@ class IgnClient:
                 "date_edition": properties.get("date_edition"),
                 "metadata": feature,
             })
-        result["tiles"] = list(validate_acquisition(tiles, bounds))
+        if targets is None:
+            result["tiles"] = list(validate_acquisition(tiles, bounds, region))
+            return result
+        selected, extraction, selection = select_mission(
+            tiles, bounds, box(*bounds) if region is None else region, targets
+        )
+        result["tiles"] = list(selected)
+        result["extraction_wkt"] = extraction.wkt
+        result["mission_selection"] = selection
         return result
 
 
@@ -435,27 +516,22 @@ def build_pdal_pipeline(tiles, bounds, output_path, polygon=None):
     if isinstance(tiles, dict):
         tiles = tiles["tiles"]
     bounds = checked_bounds(bounds)
-    tiles = validate_acquisition(tiles, bounds)
     output = Path(output_path)
     if output.suffix.lower() not in {".las", ".laz"}:
         raise IgnError("invalid_output_path", "Point-cloud output must use .las or .laz")
     west, south, east, north = bounds
     crop = f"([{west},{east}],[{south},{north}])"
     region = {"bounds": crop}
+    shape = None
     if polygon is not None:
         try:
             shape = shapely.from_wkt(polygon) if isinstance(polygon, str) else polygon
         except shapely.errors.GEOSException as error:
             raise IgnError("invalid_extent", "Invalid extraction polygon") from error
-        if (
-            shape.geom_type not in {"Polygon", "MultiPolygon"}
-            or shape.is_empty
-            or not shape.is_valid
-            or not box(*bounds).buffer(1e-6).covers(shape)
-        ):
-            raise IgnError("invalid_extent", "Extraction polygon must be valid and within bounds")
+        _requested_region(bounds, shape)
         # A single (multi)polygon keeps filters.crop to one output view.
         region = {"polygon": shape.wkt}
+    tiles = validate_acquisition(tiles, bounds, shape)
     pipeline: list[dict[str, Any]] = [
         {"type": "readers.copc", "filename": copc_url(tile["url"]), "bounds": crop,
          **({"polygon": region["polygon"]} if "polygon" in region else {}),

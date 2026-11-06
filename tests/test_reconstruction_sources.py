@@ -6,7 +6,7 @@ import pytest
 import requests
 import responses
 from shapely import from_wkt as shape_from_wkt
-from shapely.geometry import MultiPolygon, box, mapping, shape
+from shapely.geometry import MultiPolygon, Polygon, box, mapping, shape
 
 from geogen.bdnb import RELATIONSHIP_TABLES, BdnbClient, BdnbError, building_group_from_row
 from geogen.models import BuildingGroup
@@ -317,6 +317,54 @@ def test_tiles_outside_the_extent_are_dropped_before_the_mission_check():
     with pytest.raises(IgnError) as caught:
         validate_acquisition([first, north], (650001, 6860950, 650010, 6861010))
     assert caught.value.code == "acquisition_epoch_conflict"
+
+
+def test_only_the_mission_under_the_targets_is_read_and_clips_the_ground_ring():
+    from geogen.reconstruction.ign import select_mission
+    # IGN's footprints for 218 Rue du Tourne Midi; the north tile belongs to another mission.
+    south_ring = [
+        (563000.00010998, 6933000.0045928), (564000.00010917, 6933000.00459281),
+        (564000.00010917, 6932000.00459343), (563000.00010997, 6932000.00459342),
+    ]
+    north_ring = [
+        (563000.00010998, 6934000.00459219), (564000.00010918, 6934000.00459219),
+        (564000.00010917, 6933000.00459281), (563000.00010998, 6933000.0045928),
+    ]
+    first = tile(coordonnees_nw="0563-6933", metadata={"geometry": mapping(Polygon(south_ring))})
+    north = tile(
+        id="metadata.2", coordonnees_nw="0563-6934", url=TILE.replace("tile.", "other."),
+        acquisition_epoch="22LHD1IC", metadata={"geometry": mapping(Polygon(north_ring))},
+    )
+    targets = Polygon([
+        (563499.9, 6932993.0), (563500.9, 6932999.1), (563506.7, 6932997.9),
+        (563506.4, 6932995.9), (563506.1, 6932994.1), (563509.0, 6932993.6),
+        (563514.4, 6932992.7), (563513.3, 6932986.2), (563508.0, 6932987.2),
+        (563507.6, 6932985.2), (563499.8, 6932986.7), (563500.5, 6932990.7),
+        (563500.8, 6932992.8),
+    ])
+    ring = targets.buffer(10)
+    bounds = ring.bounds
+    kept, clipped, selection = select_mission([first, north], bounds, ring, targets)
+    assert kept == (first,)
+    assert clipped.bounds[3] == pytest.approx(6933000.0146)
+    assert clipped.covers(targets) and ring.buffer(1e-6).covers(clipped)
+    assert selection["selected_mission"] == "22LHDKE"
+    assert selection["excluded_tiles"] == ["0563-6934"]
+    assert selection["excluded_area_m2"] == pytest.approx(ring.area - clipped.area)
+    stages = build_pdal_pipeline(kept, bounds, "crop.laz", polygon=clipped)["pipeline"]
+    assert [s["filename"] for s in stages if s["type"] == "readers.copc"] == [copc_url(TILE)]
+    with pytest.raises(IgnError) as unclipped:
+        build_pdal_pipeline(kept, bounds, "crop.laz", polygon=ring)
+    assert unclipped.value.code == "tile_coverage_incomplete"
+    inner = box(563100, 6932100, 563115, 6932114)
+    single, region, record = select_mission(
+        [first, north], inner.buffer(10).bounds, inner.buffer(10), inner
+    )
+    assert single == (first,) and region.equals(inner.buffer(10))
+    assert record == {"missions": ["22LHDKE"]}
+    with pytest.raises(IgnError) as straddling:
+        select_mission([first, north], bounds, ring, box(563499.8, 6932995, 563514.4, 6933005))
+    assert straddling.value.code == "acquisition_epoch_conflict"
 
 
 def header_bytes(crs):

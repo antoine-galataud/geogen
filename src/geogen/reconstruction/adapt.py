@@ -13,11 +13,14 @@ from pyproj import CRS
 
 from .types import GeometryScene, ReconstructionError
 from .validate import (
+    PLANARITY_TOLERANCE,
     TOLERANCE,
     VERTEX_EQUIVALENCE_TOLERANCE,
+    WARPED_ROOF_SPREAD_TOLERANCE,
     canonical_vertices,
     face_plane,
     fail,
+    is_tolerated_warp,
     node_surfaces,
     plane_deviation,
     surface_pieces,
@@ -150,6 +153,10 @@ def _clean_consecutive_vertices(surfaces):
     return tuple(cleaned), canonical, removed
 
 
+def _output_planarity(surface):
+    return PLANARITY_TOLERANCE if is_tolerated_warp(surface) else TOLERANCE
+
+
 def _triangulate(surface, *, tolerance, used_ids, reason):
     pieces = surface_pieces(surface, planarity_tolerance=tolerance)
     if _points(pieces) != _points((surface,)):
@@ -184,7 +191,9 @@ def adapt_scene(
 
     Input warping up to ``max_deviation`` metres is triangulated, retaining every
     source vertex during decomposition, with the validator's hard topology checks
-    and its separately reported 1 mm vertex equivalence. Consecutive vertices
+    and its separately reported 1 mm vertex equivalence. Hole-free roofs warped
+    within a 0.9 mm spread are kept whole instead (see
+    :func:`~geogen.reconstruction.validate.is_tolerated_warp`). Consecutive vertices
     sharing a representative are cleaned before face checks; no face or hole may
     be collapsed or discarded.
     Each triangle becomes a distinct source face for downstream coverage checks;
@@ -227,7 +236,7 @@ def adapt_scene(
                     "planarity_tolerance_exceeded",
                 )
             pieces = (surface,)
-            if deviation > TOLERANCE:
+            if deviation > TOLERANCE and not is_tolerated_warp(surface):
                 pieces = _triangulate(
                     surface,
                     tolerance=tolerance,
@@ -290,7 +299,7 @@ def adapt_scene(
         for surface in solid.surfaces:
             owner = owners[(solid.solid_id, surface.face_id)]
             pieces = (surface,)
-            if plane_deviation(surface) > TOLERANCE:
+            if plane_deviation(surface) > TOLERANCE and not is_tolerated_warp(surface):
                 pieces = _triangulate(
                     surface,
                     tolerance=solid.validation["planarity_tolerance_m"],
@@ -303,9 +312,12 @@ def adapt_scene(
             surfaces.extend(pieces)
         planar_solids.append(replace(solid, surfaces=tuple(surfaces)))
     output = validate_scene(replace(scene, solids=tuple(planar_solids)))
+    kept_warped = []
     for solid in output.solids:
         for surface in solid.surfaces:
-            face_plane(surface, planarity_tolerance=TOLERANCE)
+            face_plane(surface, planarity_tolerance=_output_planarity(surface))
+            if plane_deviation(surface) > TOLERANCE:
+                kept_warped.append(surface.face_id)
 
     correspondence = []
     for original, planar, final, record in zip(
@@ -376,6 +388,9 @@ def adapt_scene(
         "triangles_created": sum(
             len(item["output_face_ids"]) for item in mappings if len(item["output_face_ids"]) > 1
         ),
+        "warped_roof_spread_tolerance_m": WARPED_ROOF_SPREAD_TOLERANCE,
+        "kept_warped_face_count": len(kept_warped),
+        "kept_warped_face_ids": kept_warped,
         "face_mappings": mappings,
         "source_vertex_count": len(correspondence),
         "output_vertex_count": sum(len(_points(solid.surfaces)) for solid in output.solids),
@@ -399,7 +414,7 @@ def write_scene_cityjson(scene: GeometryScene, path: Path, *, lod: str = "2.2") 
     validated = validate_scene(scene)
     for solid in validated.solids:
         for surface in solid.surfaces:
-            face_plane(surface, planarity_tolerance=TOLERANCE)
+            face_plane(surface, planarity_tolerance=_output_planarity(surface))
     if scene_geometry_hash(validated) != scene_geometry_hash(scene):
         fail("Serialize an adapted canonical scene, not unreported vertex normalization")
     try:

@@ -634,6 +634,7 @@ def save_svg_from_geometry(
     from geogen.reconstruction.validate import (
         dot,
         face_plane,
+        is_tolerated_warp,
         project,
         sub,
         surface_pieces,
@@ -687,7 +688,8 @@ def save_svg_from_geometry(
                 edges[edge] = edges.get(edge, 0) + 1
     for surface in surfaces:
         css = "roof" if surface.semantic == "RoofSurface" else "wall"
-        for piece in surface_pieces(surface):
+        pieces = (surface,) if is_tolerated_warp(surface) else surface_pieces(surface)
+        for piece in pieces:
             drawable = _Drawable(projection.depth(piece.exterior))
             drawable.add_polygon(piece.exterior, css)
             for ring in windows.get(surface.face_id, ()):

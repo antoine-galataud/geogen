@@ -23,6 +23,7 @@ from .types import (
     ThermalSpace,
 )
 from .validate import (
+    PLANARITY_TOLERANCE,
     TOLERANCE,
     _line_parts,
     _SolidIndex,
@@ -30,6 +31,7 @@ from .validate import (
     face_plane,
     face_triangles,
     fail,
+    is_tolerated_warp,
     lift,
     node_surfaces,
     norm,
@@ -194,7 +196,28 @@ def _cuts(solid, levels):
     return cuts
 
 
+def _exported_pieces(surface):
+    """Keep tolerated roof warping whole; triangulate any other warped face."""
+    return (surface,) if is_tolerated_warp(surface) else planar_pieces(surface)
+
+
+def _near_cut(surface, cuts):
+    """Whether a storey cut may clip a face, allowing for its tolerated warping."""
+    elevations = [p[2] for ring in (surface.exterior, *surface.interiors) for p in ring]
+    margin = 2 * PLANARITY_TOLERANCE
+    return any(min(elevations) - margin <= z <= max(elevations) + margin for z in cuts)
+
+
 def _partition(solid, cuts):
+    # Clipping lifts new vertices onto a face plane, which needs exact planarity.
+    solid = replace(
+        solid,
+        surfaces=tuple(
+            piece
+            for surface in solid.surfaces
+            for piece in (planar_pieces(surface) if _near_cut(surface, cuts) else (surface,))
+        ),
+    )
     containment = _SolidIndex(solid.surfaces)
     caps = [_cap(solid, z, containment) for z in cuts]
     result = []
@@ -438,7 +461,14 @@ def _checked_spaces(frame, spaces):
 
 
 def _check_conservation(original, children):
-    if abs(sum(space.volume for space in children) - original.volume) > max(
+    # A kept-whole warped roof has no unique surface: noding it can change the
+    # validator's triangulation, moving the volume by up to 2 x deviation x area.
+    warp_bound = sum(
+        2 * plane_deviation(surface) * face_plane(surface)[4].area
+        for surface in original.surfaces
+        if is_tolerated_warp(surface)
+    )
+    if abs(sum(space.volume for space in children) - original.volume) > warp_bound + max(
         TOLERANCE, original.volume * 1e-8
     ):
         fail("Thermal partition did not conserve source volume")
@@ -526,7 +556,7 @@ def _unify_scene_vertices(scene):
             surface, exterior=ring(surface.exterior), interiors=tuple(map(ring, surface.interiors))
         )
         try:
-            if plane_deviation(moved) <= TOLERANCE:
+            if is_tolerated_warp(moved) or plane_deviation(moved) <= TOLERANCE:
                 return (moved,)
         except ReconstructionError:
             pass
@@ -658,7 +688,7 @@ def _insert_junctions(scene):
             return (surface,)
         candidate = replace(surface, exterior=rings[0], interiors=rings[1:])
         try:
-            if plane_deviation(candidate) <= TOLERANCE:
+            if is_tolerated_warp(candidate) or plane_deviation(candidate) <= TOLERANCE:
                 return (candidate,)
         except ReconstructionError:
             pass
@@ -722,7 +752,8 @@ def _assemble_thermal_scene(source, children_by_solid, report, unified_m=0.0):
         ),
         "conditioning is unknown; no inferred attic exclusion",
         "GroundSurface treated as ground-contact; other unpaired faces outdoors",
-        "faces warped within 0.001 m are triangulated without relocating their vertices",
+        "roof faces warped within a 0.0009 m spread are kept whole; other warped faces are "
+        "triangulated without relocating their vertices",
     )
     if unified_m:
         assumptions += (
@@ -791,7 +822,7 @@ def make_thermal_scene(
         solid = replace(
             original,
             surfaces=tuple(
-                piece for surface in original.surfaces for piece in planar_pieces(surface)
+                piece for surface in original.surfaces for piece in _exported_pieces(surface)
             ),
         )
         children = (_space(solid, solid.solid_id),)

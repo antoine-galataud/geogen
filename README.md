@@ -91,7 +91,8 @@ Replays use their captured attributes; run online again to fetch newly supported
 
 Fixed policies, all reported in `MODEL.reconstruction.json`:
 
-- warped Roofer faces are triangulated within 5 cm, and duplicate vertices are cleaned;
+- Roofer roof faces warped within 0.9 mm (quantization noise) are kept whole; other warped
+  faces are triangulated within 5 cm, and duplicate vertices are cleaned;
 - units whose LoD2.2 geometry is unusable fall back to a validated Roofer LoD1.2 envelope,
   while other units keep their LoD2.2 roofs;
 - ground is searched outside all outlines up to 10 m; class 67 points are used as buildings;

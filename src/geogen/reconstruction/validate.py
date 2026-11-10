@@ -23,6 +23,9 @@ from .types import GeometryScene, ReconstructionError
 TOLERANCE = 1e-6
 PLANARITY_TOLERANCE = 1e-3
 VERTEX_EQUIVALENCE_TOLERANCE = 1e-3
+# OpenStudio's computeTriangulation (rendering, gbXML, ...) drops faces whose vertices
+# span more than 1 mm along their Newell normal; kept-whole roofs keep a 10% margin.
+WARPED_ROOF_SPREAD_TOLERANCE = 9e-4
 
 
 def fail(message, code="geometry_invalid"):
@@ -213,6 +216,24 @@ def plane_deviation(surface, plane=None):
         for ring in (surface.exterior, *surface.interiors)
         for point in ring
     )
+
+
+def is_tolerated_warp(surface):
+    """Whether a face may be exported whole although it is warped beyond ``TOLERANCE``.
+
+    Roofer's roof planes carry sub-millimetre quantization noise; triangulating
+    every such face multiplies roof surfaces. Hole-free exterior roofs whose
+    vertices span at most ``WARPED_ROOF_SPREAD_TOLERANCE`` along their Newell
+    normal are therefore kept whole: OpenStudio and EnergyPlus accept them, and
+    roofs never form thermal interfaces. Walls, interfaces and faces with holes
+    still require exact planarity, and internal checks keep triangulating
+    through ``planar_pieces``.
+    """
+    if surface.semantic != "RoofSurface" or surface.interiors or surface.interface_id:
+        return False
+    origin, _, _, normal, _ = face_plane(surface, planarity_tolerance=math.inf)
+    heights = [dot(sub(point, origin), normal) for point in surface.exterior]
+    return max(heights) - min(heights) <= WARPED_ROOF_SPREAD_TOLERANCE
 
 
 def planar_pieces(surface):

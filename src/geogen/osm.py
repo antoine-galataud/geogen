@@ -348,7 +348,13 @@ def build_model_from_geometry(
     from dataclasses import replace
 
     from geogen.reconstruction.thermal import validate_thermal_scene
-    from geogen.reconstruction.validate import face_plane, node_surfaces, surface_pieces
+    from geogen.reconstruction.validate import (
+        face_plane,
+        is_tolerated_warp,
+        node_surfaces,
+        plane_deviation,
+        surface_pieces,
+    )
 
     validate_thermal_scene(scene)
     window_ratios = window_ratios or {}
@@ -415,6 +421,14 @@ def build_model_from_geometry(
         space.setThermalZone(zone)
         _assign_geometry_story(model, space, thermal_space, stories)
         manifest["spaces"][space.nameString()] = thermal_space.volume
+        warp_bound = sum(
+            2 * plane_deviation(surface) * face_plane(surface)[4].area
+            for surface in thermal_space.surfaces
+            if is_tolerated_warp(surface)
+        )
+        if warp_bound:
+            # Warped roofs have no unique surface; OpenStudio triangulates them its own way.
+            manifest.setdefault("volume_tolerances", {})[space.nameString()] = warp_bound
         ratios_by_model_space[space.nameString()] = window_ratios.get(
             thermal_space.space_id, window_to_wall_ratio
         )
@@ -446,7 +460,7 @@ def build_model_from_geometry(
                     for i, tile in enumerate(reference)
                 )
             else:
-                tiles = surface_pieces(surface)
+                tiles = (surface,) if is_tolerated_warp(surface) else surface_pieces(surface)
                 if surface.interface_id:
                     interfaces[surface.interface_id] = tiles
             if not math.isclose(
@@ -648,13 +662,16 @@ def _check_geometry_model(model, manifest):
     from shapely.geometry import Polygon
 
     from geogen.reconstruction.types import Surface
-    from geogen.reconstruction.validate import face_plane, project
+    from geogen.reconstruction.validate import face_plane, plane_deviation, project
 
     actual_spaces = {space.nameString(): space for space in model.getSpaces()}
     if set(actual_spaces) != set(manifest["spaces"]):
         raise ModelError("OpenStudio changed the thermal space inventory")
     for name, volume in manifest["spaces"].items():
-        if not math.isclose(actual_spaces[name].volume(), volume, rel_tol=1e-7, abs_tol=1e-6):
+        tolerance = 1e-6 + manifest.get("volume_tolerances", {}).get(name, 0.0)
+        if not math.isclose(
+            actual_spaces[name].volume(), volume, rel_tol=1e-7, abs_tol=tolerance
+        ):
             raise ModelError(f"OpenStudio changed the enclosed volume of {name}")
     actual = {surface.nameString(): surface for surface in model.getSurfaces()}
     if set(actual) != set(manifest["surfaces"]):
@@ -663,7 +680,9 @@ def _check_geometry_model(model, manifest):
         surface = actual[name]
         if not surface.space().is_initialized():
             raise ModelError(f"OpenStudio removed space ownership: {name}")
-        plane = face_plane(Surface(name, tuple(tuple(p) for p in expected["vertices"])))
+        expected_surface = Surface(name, tuple(tuple(p) for p in expected["vertices"]))
+        plane = face_plane(expected_surface)
+        warp = plane_deviation(expected_surface, plane)
         world_vertices = surface.space().get().transformation() * surface.vertices()
         vertices = [(p.x(), p.y(), p.z()) for p in world_vertices]
         actual_plane = face_plane(Surface(name, tuple(vertices)))
@@ -672,12 +691,20 @@ def _check_geometry_model(model, manifest):
             polygon.symmetric_difference(plane[4]).area > 1e-6
             or sum(a * b for a, b in zip(plane[3], actual_plane[3])) < 1 - 1e-8
             or any(
-                abs(sum((p[i] - plane[0][i]) * plane[3][i] for i in range(3))) > 1e-6
+                abs(sum((p[i] - plane[0][i]) * plane[3][i] for i in range(3)))
+                > 1e-6 + warp
                 for p in vertices
             )
             or not math.isclose(surface.grossArea(), expected["area"], rel_tol=1e-8, abs_tol=1e-6)
         ):
             raise ModelError(f"OpenStudio changed face geometry/winding: {name}")
+        aligned = openstudio.Transformation.alignFace(surface.vertices())
+        if not openstudio.computeTriangulation(
+            openstudio.reverse(aligned.inverse() * surface.vertices()),
+            openstudio.Point3dVectorVector(),
+        ):
+            # OpenStudio renderers and exporters silently drop such faces.
+            raise ModelError(f"OpenStudio cannot triangulate face: {name}")
         if (
             not surface.space().is_initialized()
             or surface.space().get().nameString() != expected["space"]
@@ -703,7 +730,7 @@ def _check_translated_geometry(workspace, manifest):
     from shapely.geometry import Polygon
 
     from geogen.reconstruction.types import Surface
-    from geogen.reconstruction.validate import face_plane, project
+    from geogen.reconstruction.validate import face_plane, plane_deviation, project
 
     objects = workspace.getObjectsByType(openstudio.IddObjectType("BuildingSurface:Detailed"))
     actual = {obj.getString(0).get(): obj for obj in objects}
@@ -718,14 +745,17 @@ def _check_translated_geometry(workspace, manifest):
             if any(not coord.is_initialized() for coord in coords):
                 raise ModelError(f"IDF contains invalid vertices on {name}")
             vertices.append(tuple(coord.get() for coord in coords))
-        plane = face_plane(Surface(name, tuple(tuple(p) for p in values["vertices"])))
+        expected_surface = Surface(name, tuple(tuple(p) for p in values["vertices"]))
+        plane = face_plane(expected_surface)
+        warp = plane_deviation(expected_surface, plane)
         actual_plane = face_plane(Surface(name, tuple(vertices)))
         polygon = Polygon([project(point, plane) for point in vertices])
         if (
             polygon.symmetric_difference(plane[4]).area > 1e-6
             or sum(a * b for a, b in zip(plane[3], actual_plane[3])) < 1 - 1e-8
             or any(
-                abs(sum((p[i] - plane[0][i]) * plane[3][i] for i in range(3))) > 1e-6
+                abs(sum((p[i] - plane[0][i]) * plane[3][i] for i in range(3)))
+                > 1e-6 + warp
                 for p in vertices
             )
         ):

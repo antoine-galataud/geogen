@@ -26,7 +26,12 @@ from geogen.reconstruction.types import (
     Solid,
     Surface,
 )
-from geogen.reconstruction.validate import face_plane, plane_deviation, validate_scene
+from geogen.reconstruction.validate import (
+    face_plane,
+    is_tolerated_warp,
+    plane_deviation,
+    validate_scene,
+)
 from geogen.svg import SvgError, save_svg_from_geometry
 
 FRAME = GeometryFrame("EPSG:2154", "IGN69", (652000.0, 6862000.0, 35.0))
@@ -846,8 +851,8 @@ def test_millimetre_quantized_sloped_ngon_is_not_rejected(tmp_path):
         for s in space.surfaces
         if s.semantic == "RoofSurface" and not s.interface_id
     ]
-    assert len(roofs) == 2
-    assert all(plane_deviation(surface) < 1e-6 for surface in roofs)
+    assert len(roofs) == 1
+    assert all(1e-6 < plane_deviation(surface) < 0.001 for surface in roofs)
     expected_vertices = {
         p
         for surface in scene.solids[0].surfaces
@@ -861,7 +866,102 @@ def test_millimetre_quantized_sloped_ngon_is_not_rejected(tmp_path):
     assert sum(space.volume for space in thermal.spaces) == pytest.approx(scene.solids[0].volume)
     model = build_model_from_geometry(thermal)
     assert save_model_from_geometry(model, tmp_path / "quantized.osm").exists()
+    assert [
+        s.nameString() for s in model.getSurfaces() if s.surfaceType() == "RoofCeiling"
+    ] == [roofs[0].face_id]
     assert save_svg_from_geometry(thermal, tmp_path / "quantized.svg").exists()
+
+
+def _warped_octagonal_roof_prism(amplitude):
+    """A 10 m box with edge-midpoint roof vertices offset so vertex 0 lies mid-range."""
+    ring = ((0.0, 0.0), (5.0, 0.0), (10.0, 0.0), (10.0, 5.0),
+            (10.0, 10.0), (5.0, 10.0), (0.0, 10.0), (0.0, 5.0))
+    offsets = dict(zip(ring, (0, 1, -1, 1, 1, -1, 1, 0)))
+    midpoints = {
+        frozenset({ring[i - 1], ring[(i + 1) % 8]}): ring[i] for i in range(1, 8, 2)
+    }
+
+    def warped(ring3):
+        out = []
+        for a, b in zip(ring3, (*ring3[1:], ring3[0])):
+            out.append(a)
+            middle = midpoints.get(frozenset({a[:2], b[:2]}))
+            if middle and a[2] == b[2] == 6.0:
+                out.append((*middle, 6.0))
+        return tuple(
+            (x, y, z + amplitude * offsets[x, y]) if z == 6.0 else (x, y, z)
+            for x, y, z in out
+        )
+
+    solid = prism()
+    solid = replace(
+        solid, surfaces=tuple(replace(s, exterior=warped(s.exterior)) for s in solid.surfaces)
+    )
+    scene = validate_scene(GeometryScene(FRAME, (solid,)))
+    roof = next(s for s in scene.solids[0].surfaces if s.semantic == "RoofSurface")
+    assert len(roof.exterior) == 8
+    return scene, roof
+
+
+def test_roof_spread_beyond_openstudio_triangulation_tolerance_is_triangulated(tmp_path):
+    scene, roof = _warped_octagonal_roof_prism(0.0007)
+    assert plane_deviation(roof) < 0.001
+    assert not is_tolerated_warp(roof)
+    thermal = make_thermal_scene(scene)
+    roofs = [s for space in thermal.spaces for s in space.surfaces if s.semantic == "RoofSurface"]
+    assert len(roofs) == 6
+    assert all(plane_deviation(s) < 1e-6 for s in roofs)
+    model = build_model_from_geometry(thermal)
+    assert save_model_from_geometry(model, tmp_path / "spread.osm").exists()
+    _, kept = _warped_octagonal_roof_prism(0.0002)
+    assert is_tolerated_warp(kept)
+
+
+def test_export_rejects_faces_openstudio_cannot_triangulate(monkeypatch):
+    import geogen.reconstruction.thermal as thermal_module
+    import geogen.reconstruction.validate as validate_module
+
+    def lenient(surface):
+        return surface.semantic == "RoofSurface" and not surface.interface_id
+
+    monkeypatch.setattr(thermal_module, "is_tolerated_warp", lenient)
+    monkeypatch.setattr(validate_module, "is_tolerated_warp", lenient)
+    scene, _ = _warped_octagonal_roof_prism(0.0007)
+    thermal = make_thermal_scene(scene)
+    with pytest.raises(ModelError, match="cannot triangulate"):
+        build_model_from_geometry(thermal)
+
+
+def test_warped_roof_crossing_a_storey_cut_is_triangulated_before_clipping(tmp_path):
+    solid = prism()
+    solid = replace(
+        solid,
+        surfaces=tuple(
+            replace(
+                surface,
+                exterior=tuple(
+                    (x, y, 3.0 + 0.6 * x + (0.0005 if (x, y) == (10.0, 10.0) else 0.0))
+                    if z == 6.0
+                    else (x, y, z)
+                    for x, y, z in surface.exterior
+                ),
+            )
+            for surface in solid.surfaces
+        ),
+    )
+    scene = validate_scene(GeometryScene(FRAME, (solid,)))
+    roof = next(s for s in scene.solids[0].surfaces if s.semantic == "RoofSurface")
+    assert 1e-6 < plane_deviation(roof) < 0.001
+    thermal = make_thermal_scene(scene, levels={"building": [4.0]})
+    assert len(thermal.spaces) == 2
+    assert all(
+        plane_deviation(s) < 1e-6 for space in thermal.spaces for s in space.surfaces
+    )
+    assert sum(space.volume for space in thermal.spaces) == pytest.approx(
+        scene.solids[0].volume
+    )
+    model = build_model_from_geometry(thermal)
+    assert save_model_from_geometry(model, tmp_path / "cut.osm").exists()
 
 
 def test_vertices_within_one_millimetre_are_equivalent():

@@ -21,6 +21,7 @@ from geogen.reconstruction.types import (
     Surface,
 )
 from geogen.reconstruction.validate import (
+    PLANARITY_TOLERANCE,
     TOLERANCE,
     face_plane,
     plane_deviation,
@@ -242,7 +243,7 @@ def test_normalization_induced_warp_is_reported_and_made_canonically_planar():
     wall = replace(
         wall,
         exterior=tuple(
-            (x, y, z - 0.0004) if (x, y, z) == (10.0, 10.0, 6.0) else (x, y, z)
+            (x, y - 0.0004, z) if (x, y, z) == (10.0, 10.0, 6.0) else (x, y, z)
             for x, y, z in wall.exterior
         ),
     )
@@ -251,6 +252,7 @@ def test_normalization_induced_warp_is_reported_and_made_canonically_planar():
     assert ledger["max_original_deviation_m"] <= TOLERANCE
     assert ledger["input_triangulated_face_count"] == 0
     assert ledger["normalization_triangulated_face_count"] == 1
+    assert ledger["kept_warped_face_count"] == 0
     assert ledger["moved_vertex_count"] == 1
     assert ledger["max_vertex_movement_m"] == pytest.approx(0.0004)
     assert all(plane_deviation(surface) <= TOLERANCE for surface in output.solids[0].surfaces)
@@ -259,6 +261,53 @@ def test_normalization_induced_warp_is_reported_and_made_canonically_planar():
     assert repeated == output
     assert repeated_ledger["moved_vertex_count"] == 0
     assert repeated_ledger["triangulated_face_count"] == 0
+
+
+def test_normalization_induced_roof_warp_within_planarity_tolerance_is_kept_whole():
+    solid = prism()
+    wall = solid.surfaces[3]
+    wall = replace(
+        wall,
+        exterior=tuple(
+            (x, y, z - 0.0004) if (x, y, z) == (10.0, 10.0, 6.0) else (x, y, z)
+            for x, y, z in wall.exterior
+        ),
+    )
+    solid = replace(solid, surfaces=(*solid.surfaces[:3], wall, *solid.surfaces[4:]))
+    output, ledger = adapt_scene(GeometryScene(FRAME, (solid,)))
+    assert ledger["triangulated_face_count"] == 0
+    assert ledger["kept_warped_face_ids"] == ["building:roof"]
+    roof = next(s for s in output.solids[0].surfaces if s.semantic == "RoofSurface")
+    assert roof.face_id == "building:roof"
+    assert TOLERANCE < plane_deviation(roof) <= PLANARITY_TOLERANCE
+    assert validate_scene(output) == output
+    repeated, repeated_ledger = adapt_scene(output)
+    assert repeated == output
+    assert repeated_ledger["triangulated_face_count"] == 0
+
+
+def test_submillimetre_warped_roof_is_kept_whole_but_warped_ground_is_triangulated():
+    output, ledger = adapt_scene(GeometryScene(FRAME, (prism(warp=0.0005),)))
+    surfaces = output.solids[0].surfaces
+    roofs = [s for s in surfaces if s.semantic == "RoofSurface"]
+    assert [roof.face_id for roof in roofs] == ["building:roof"]
+    assert TOLERANCE < plane_deviation(roofs[0]) <= PLANARITY_TOLERANCE
+    assert ledger["kept_warped_face_ids"] == ["building:roof"]
+    assert ledger["triangulated_face_count"] == 0
+    assert validate_scene(output) == output
+    lifted = {(10.0, 10.0, 0.0): (10.0, 10.0, 0.0005)}
+    solid = prism()
+    solid = replace(
+        solid,
+        surfaces=tuple(
+            replace(s, exterior=tuple(lifted.get(p, p) for p in s.exterior))
+            for s in solid.surfaces
+        ),
+    )
+    output, ledger = adapt_scene(GeometryScene(FRAME, (solid,)))
+    assert ledger["kept_warped_face_count"] == 0
+    assert ledger["input_triangulated_face_count"] == 1
+    assert all(plane_deviation(s) <= TOLERANCE for s in output.solids[0].surfaces)
 
 
 def test_edge_noding_is_reported_without_inventing_or_moving_vertices():
@@ -368,8 +417,18 @@ def test_cityjson_preserves_selected_building_parts_and_multisolid_nesting(tmp_p
 
 
 def test_serializer_does_not_silently_normalize_or_export_nonplanar_input(tmp_path):
+    solid = prism()
+    lifted = {(10.0, 10.0, 0.0): (10.0, 10.0, 0.00002)}
+    solid = replace(
+        solid,
+        surfaces=tuple(
+            replace(s, exterior=tuple(lifted.get(p, p) for p in s.exterior))
+            for s in solid.surfaces
+        ),
+    )
     with pytest.raises(ReconstructionError):
-        write_scene_cityjson(GeometryScene(FRAME, (prism(warp=0.00002),)), tmp_path / "warped.json")
+        write_scene_cityjson(GeometryScene(FRAME, (solid,)), tmp_path / "warped.json")
+    write_scene_cityjson(GeometryScene(FRAME, (prism(warp=0.00002),)), tmp_path / "roof.json")
     solid = prism()
     roof = solid.surfaces[1]
     roof = replace(roof, exterior=((0.0005, 0.0, 6.0), *roof.exterior[1:]))

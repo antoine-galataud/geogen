@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from collections import defaultdict
 from dataclasses import replace
@@ -88,7 +89,17 @@ ENVELOPE_CLASSIFICATION_COLUMNS = (
     "type_vitrage",
 )
 
-DPE_COLUMNS = GLAZING_COLUMNS + ENVELOPE_CLASSIFICATION_COLUMNS
+#: Representative-DPE properties, not face measurements. Use raw floor U (not the
+#: ground-adjusted ``final`` value) and Uw (not Ujn, which includes shutters).
+THERMAL_COLUMNS = {
+    "wall_u_value": "u_mur_exterieur",
+    "roof_u_value": "u_plancher_haut_deperditif",
+    "floor_u_value": "u_plancher_bas_brut_deperditif",
+    "window_u_value": "uw",
+    "window_solar_factor": "facteur_solaire_baie_vitree",
+}
+
+DPE_COLUMNS = GLAZING_COLUMNS + ENVELOPE_CLASSIFICATION_COLUMNS + tuple(THERMAL_COLUMNS.values())
 
 #: Glazed area of a facade, per cardinal direction.
 GLAZED_AREA_COLUMNS = (
@@ -120,6 +131,12 @@ UNKNOWN_COLUMN_CODE = "42703"
 
 #: PostgREST and PostgreSQL codes returned when a table is not part of the schema.
 UNKNOWN_TABLE_CODES = frozenset({"PGRST205", "42P01"})
+
+RELATIONSHIP_PAGE_SIZE = 500
+RELATIONSHIP_TABLES = (
+    "donnees/batiment_construction",
+    "donnees/rel_batiment_groupe_bdtopo_bat",
+)
 
 _UNKNOWN_COLUMN_RE = re.compile(r"column\s+\"?(?:[\w.]+\.)?(\w+)\"?\s+does not exist", re.I)
 
@@ -243,11 +260,9 @@ def _error_payload(response: requests.Response | None) -> Any:
         return None
 
 
-def building_group_from_row(
-    row: dict[str, Any], *, building_class: type[BuildingGroup] = BuildingGroup
-) -> BuildingGroup:
-    """Parse a ``batiment_groupe_complet`` row without duplicating model fields."""
-    return building_class(
+def building_group_from_row(row: dict[str, Any]) -> BuildingGroup:
+    """Parse a ``batiment_groupe_complet`` row."""
+    return BuildingGroup(
         batiment_groupe_id=str(row.get("batiment_groupe_id") or ""),
         batiment_construction_id=_as_code(row.get("batiment_construction_id"))
         or _as_code(row.get("rnb_id")),
@@ -269,7 +284,20 @@ def building_group_from_row(
         upper_floor_insulation=row.get("type_isolation_plancher_haut", NOT_PROVIDED),
         lower_floor_insulation=row.get("type_isolation_plancher_bas", NOT_PROVIDED),
         glazing_type=row.get("type_vitrage", NOT_PROVIDED),
+        **{
+            field: _thermal_value(row.get(column), solar_factor=field == "window_solar_factor")
+            for field, column in THERMAL_COLUMNS.items()
+        },
     )
+
+
+def _thermal_value(value: Any, *, solar_factor: bool = False) -> float | None:
+    number = _as_float(value)
+    if isinstance(value, bool) or number is None or not math.isfinite(number):
+        return None
+    if solar_factor:
+        return number if 0 <= number <= 1 else None
+    return number if number > 0 else None
 
 
 class BdnbClient:
@@ -281,7 +309,6 @@ class BdnbClient:
         *,
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT,
-        session: requests.Session | None = None,
     ) -> None:
         if not api_key:
             LOGGER.info(
@@ -293,7 +320,7 @@ class BdnbClient:
         self._unknown_columns: dict[str, set[str]] = defaultdict(set)
         #: Tables the BDNB does not publish.
         self._unknown_tables: set[str] = set()
-        self._session = session or requests.Session()
+        self._session = requests.Session()
         self._session.headers.update({"Accept": "application/json"})
         if api_key:
             self._session.headers.update({API_KEY_HEADER: api_key})
@@ -338,6 +365,74 @@ class BdnbClient:
             raise BdnbError(f"BDNB API returned an unexpected response for {path}")
         return [row for row in payload if isinstance(row, dict)]
 
+    def relationship_rows(
+        self, group_ids: list[str] | tuple[str, ...], *, include_rnb: bool = False,
+    ) -> dict[str, Any]:
+        """Fetch explicit identities, with unmodified page snapshots for provenance.
+
+        A construction's ``rnb_id`` is a separate identity, never an alias for its
+        construction ID. Only a confirmed missing table is optional; transport,
+        authorization and malformed responses remain errors.
+        """
+        ids = sorted(set(group_ids))
+        if len(ids) > 500 or any(not re.fullmatch(r"[\w:-]+", value) for value in ids):
+            raise ValueError("Expected at most 500 valid BDNB group identifiers")
+        result: dict[str, Any] = {"rows": [], "pages": [], "tables": {}}
+        if not ids:
+            return result
+        tables = RELATIONSHIP_TABLES + (
+            ("donnees/rel_batiment_groupe_rnb",) if include_rnb else ()
+        )
+        for table in tables:
+            offset = 0
+            seen_pages: set[str] = set()
+            order = {
+                "donnees/batiment_construction": "batiment_groupe_id,batiment_construction_id",
+                "donnees/rel_batiment_groupe_bdtopo_bat": "batiment_groupe_id,bdtopo_bat_cleabs",
+                "donnees/rel_batiment_groupe_rnb": "batiment_groupe_id,rnb_id",
+            }[table]
+            while True:
+                params = {
+                    "batiment_groupe_id": "in.(" + ",".join(ids) + ")",
+                    "select": "*", "order": order,
+                    "limit": RELATIONSHIP_PAGE_SIZE, "offset": offset,
+                }
+                url = requests.Request(
+                    "GET", f"{self.base_url}/{table}", params=params
+                ).prepare().url
+                try:
+                    payload = self._get(table, params)
+                except BdnbError as error:
+                    if offset or not unknown_table(error) or error.status in {401, 403}:
+                        raise
+                    result["tables"][table] = {
+                        "status": "unavailable", "code": error.code, "payload": error.payload,
+                    }
+                    result["pages"].append(
+                        {"url": url, "params": params, "payload": error.payload,
+                         "status": "unavailable"}
+                    )
+                    break
+                if not isinstance(payload, list) or any(
+                    not isinstance(row, dict) or not row.get("batiment_groupe_id")
+                    or str(row["batiment_groupe_id"]) not in ids
+                    or not row.get(order.split(",")[-1]) for row in payload
+                ):
+                    raise BdnbError(f"Malformed relationship rows from {table}")
+                result["pages"].append({"url": url, "params": params, "payload": payload})
+                result["tables"][table] = {"status": "available"}
+                if not payload:
+                    break
+                signature = json.dumps(payload, sort_keys=True)
+                if signature in seen_pages:
+                    raise BdnbError(f"Relationship pagination did not advance for {table}")
+                seen_pages.add(signature)
+                result["rows"].extend(dict(row, _source_table=table) for row in payload)
+                offset += len(payload)
+                if offset > 10000:
+                    raise BdnbError(f"Relationship result exceeds safe row bound for {table}")
+        return result
+
     def geocode(self, query: str, *, limit: int = 5) -> list[Address]:
         """Geocode a free form address with the BDNB geocoder."""
         payload = self._get("geocodage", {"q": query, "limit": limit})
@@ -353,7 +448,6 @@ class BdnbClient:
                     Address(
                         cle_interop_adr=str(key),
                         label=properties.get("label") or properties.get("libelle_adresse"),
-                        code_commune_insee=properties.get("code_commune_insee"),
                     )
                 )
         return addresses
@@ -371,7 +465,7 @@ class BdnbClient:
             "donnees/adresse",
             {
                 "libelle_adresse": f"ilike.{pattern}",
-                "select": "cle_interop_adr,libelle_adresse,code_commune_insee",
+                "select": "cle_interop_adr,libelle_adresse",
                 "limit": limit,
             },
         )
@@ -379,7 +473,6 @@ class BdnbClient:
             Address(
                 cle_interop_adr=str(row["cle_interop_adr"]),
                 label=row.get("libelle_adresse"),
-                code_commune_insee=row.get("code_commune_insee"),
             )
             for row in rows
             if row.get("cle_interop_adr")
@@ -424,7 +517,7 @@ class BdnbClient:
         if row is None:
             return None
         self._complete_envelope(row, batiment_groupe_id)
-        group = BuildingGroup.from_row(row)
+        group = building_group_from_row(row)
         walls = self._building_walls(batiment_groupe_id)
         return replace(group, walls=walls) if walls else group
 
@@ -438,7 +531,12 @@ class BdnbClient:
         classifications_missing = any(
             column not in row for column in ENVELOPE_CLASSIFICATION_COLUMNS
         )
-        if row.get("pourcentage_surface_baie_vitree_exterieur") is None or classifications_missing:
+        thermal_missing = any(row.get(column) is None for column in THERMAL_COLUMNS.values())
+        if (
+            row.get("pourcentage_surface_baie_vitree_exterieur") is None
+            or classifications_missing
+            or thermal_missing
+        ):
             self._merge_row(
                 row,
                 DPE_TABLE,
@@ -467,8 +565,9 @@ class BdnbClient:
             LOGGER.debug("Reading %s failed (%s), skipping it", table, error)
             return
         for column, value in (extra or {}).items():
-            if column in preserve_null_columns and column not in row:
-                row[column] = value
+            if column in preserve_null_columns:
+                if column not in row:
+                    row[column] = value
             elif value is not None and row.get(column) is None:
                 row[column] = value
 

@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "image": "3dgi/3dbag-pipeline-tools@sha256:055d02c5ea9ed23945e2f96725a1637e0d9fc66c68b78b92148ce953ba8c22c5",
+  "observed_tag": "2026.07.29",
+  "observed_at": "2026-10-22",
+  "versions": {
+    "roofer": "roofer c9f272f (dirty, 2025-12-03 17:42:21 +0000)",
+    "gdal": "3.8.5",
+    "pdal": "2.8.4",
+    "val3dity": "2.4.0",
+    "cjio": "0.10.1"
+  },
+  "default_complexity": 0.888,
+  "output": "CityJSON 2.0 header followed by CityJSONFeature records (.city.jsonl)",
+  "validator": "val3dity INPUT.city.jsonl --report REPORT.json",
+  "source_reference": "IGNF/roofer@ed5641853f73593ab99ecb5d4ae223ff6f615e53",
+  "source_reference_note": "Reference only; the executable in this immutable image identifies itself as c9f272f dirty, not the reference commit."
+}

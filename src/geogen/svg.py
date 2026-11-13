@@ -32,6 +32,7 @@ from geogen.geometry import (
     floor_patches,
     roof_faces,
 )
+from geogen.reconstruction.types import ThermalScene
 
 LOGGER = logging.getLogger(__name__)
 
@@ -490,21 +491,15 @@ def _canvas_transform(points: list[Point2D], width: int, height: int, margin: fl
     return transform
 
 
-def _points_attribute(points: Iterable[Point2D]) -> str:
-    return " ".join(f"{x:.6f},{y:.6f}" for x, y in points)
-
-
 def save_svg(
     footprints: Iterable[Footprint],
     path: str | Path,
     *,
     width: int = DEFAULT_SVG_WIDTH,
     height: int = DEFAULT_SVG_HEIGHT,
-    margin: float = DEFAULT_SVG_MARGIN,
     azimuth: float = DEFAULT_CAMERA_AZIMUTH,
     elevation: float = DEFAULT_CAMERA_ELEVATION,
     max_roof_height: float = DEFAULT_MAX_ROOF_HEIGHT,
-    background: str = "white",
 ) -> Path:
     """Write an orthographic SVG preview of ``footprints`` to ``path``.
 
@@ -518,7 +513,7 @@ def save_svg(
         raise SvgError("At least one footprint is required to generate an SVG")
     if width <= 0 or height <= 0:
         raise SvgError("SVG width and height must be positive")
-    if margin < 0 or 2 * margin >= min(width, height):
+    if 2 * DEFAULT_SVG_MARGIN >= min(width, height):
         raise SvgError("SVG margin is too large for the requested canvas")
     if not 0.0 <= elevation < 90.0:
         raise SvgError("SVG camera elevation must be between 0 and 90 degrees")
@@ -528,7 +523,7 @@ def save_svg(
     )
     drawables = _build_scene(footprints, projection, max_roof_height)
     projected_points = _all_projected_points(drawables, projection)
-    canvas = _canvas_transform(projected_points, width, height, margin)
+    canvas = _canvas_transform(projected_points, width, height, DEFAULT_SVG_MARGIN)
 
     svg = ET.Element(
         f"{{{_SVG_NS}}}svg",
@@ -562,7 +557,7 @@ def save_svg(
             "y": "0",
             "width": "100%",
             "height": "100%",
-            "fill": background,
+            "fill": "white",
         },
     )
 
@@ -612,4 +607,224 @@ def save_svg(
         raise SvgError(f"Could not write SVG preview to {destination}: {error}") from error
 
     LOGGER.info("Wrote SVG preview to %s", destination)
+    return destination
+
+
+def save_svg_from_geometry(
+    scene: ThermalScene,
+    path: str | Path,
+    *,
+    width: int = DEFAULT_SVG_WIDTH,
+    height: int = DEFAULT_SVG_HEIGHT,
+    azimuth: float = DEFAULT_CAMERA_AZIMUTH,
+    elevation: float = DEFAULT_CAMERA_ELEVATION,
+    windows: dict[str, tuple] | None = None,
+) -> Path:
+    """Project exact reconstructed faces and optional actual model windows.
+
+    ``windows`` is the thermal-face-ID mapping returned by
+    ``geogen.osm.windows_from_geometry_model``. Glazing is clipped with its host
+    face and all foreground occluders, rather than reconstructed from a ratio.
+    """
+    import json
+    from dataclasses import asdict
+
+    from geogen.reconstruction.thermal import validate_thermal_scene
+    from geogen.reconstruction.types import Surface
+    from geogen.reconstruction.validate import (
+        dot,
+        face_plane,
+        is_tolerated_warp,
+        project,
+        sub,
+        surface_pieces,
+    )
+
+    validate_thermal_scene(scene)
+    if (
+        width <= 0
+        or height <= 0
+        or 2 * DEFAULT_SVG_MARGIN >= min(width, height)
+        or not all(math.isfinite(v) for v in (width, height, azimuth, elevation))
+        or not 0 <= elevation < 90
+    ):
+        raise SvgError("Invalid SVG canvas or camera")
+    surfaces = [s for space in scene.spaces for s in space.surfaces if s.boundary != "surface"]
+    windows = windows or {}
+    by_id = {surface.face_id: surface for surface in surfaces}
+    if set(windows) - set(by_id):
+        raise SvgError("Generated windows reference unknown or internal thermal faces")
+    for face_id, rings in windows.items():
+        surface = by_id[face_id]
+        if surface.boundary != "outdoors" or surface.semantic != "WallSurface":
+            raise SvgError("Generated windows must belong to outdoor walls")
+        plane = face_plane(surface)
+        projected_windows = []
+        for ring in rings:
+            face_plane(Surface("generated-window", ring))
+            polygon = Polygon([project(point, plane) for point in ring])
+            if (
+                any(abs(dot(sub(point, plane[0]), plane[3])) > 1e-6 for point in ring)
+                or polygon.difference(plane[4]).area > 1e-6
+            ):
+                raise SvgError("Generated window is outside its thermal wall")
+            projected_windows.append(polygon)
+        if sum(p.area for p in projected_windows) - unary_union(projected_windows).area > 1e-6:
+            raise SvgError("Generated windows overlap")
+    points = [p for surface in surfaces for p in surface.exterior]
+    if not points:
+        raise SvgError("The reconstructed scene has no exterior")
+    origin = tuple((min(p[i] for p in points) + max(p[i] for p in points)) / 2 for i in (0, 1))
+    projection = _Projection(origin, azimuth, elevation)
+    drawables, sources = [], {}
+    quantized_edges = {}
+    for surface in surfaces:
+        if not any(p.startswith("quantization_planarity:") for p in surface.provenance):
+            continue
+        edges = quantized_edges.setdefault(surface.source_face_id, {})
+        for ring in (surface.exterior, *surface.interiors):
+            for a, b in zip(ring, (*ring[1:], ring[0])):
+                edge = tuple(sorted(tuple(round(v, 8) for v in p) for p in (a, b)))
+                edges[edge] = edges.get(edge, 0) + 1
+    for surface in surfaces:
+        css = "roof" if surface.semantic == "RoofSurface" else "wall"
+        pieces = (surface,) if is_tolerated_warp(surface) else surface_pieces(surface)
+        for piece in pieces:
+            drawable = _Drawable(projection.depth(piece.exterior))
+            drawable.add_polygon(piece.exterior, css)
+            for ring in windows.get(surface.face_id, ()):
+                drawable.add_polygon(ring, "window")
+            drawables.append(drawable)
+            sources[id(drawable)] = surface
+    drawables = _sort_drawables(drawables, projection)
+    canvas = _canvas_transform(
+        _all_projected_points(drawables, projection), width, height, DEFAULT_SVG_MARGIN
+    )
+    svg = ET.Element(
+        f"{{{_SVG_NS}}}svg",
+        {
+            "width": str(width),
+            "height": str(height),
+            "viewBox": f"0 0 {width} {height}",
+            "role": "img",
+            "aria-label": "Experimental reconstructed geometry preview",
+            "data-geometry-hash": scene.geometry_hash,
+        },
+    )
+    ET.SubElement(svg, f"{{{_SVG_NS}}}title").text = (
+        "Geogen reconstructed geometry (unverified fidelity)"
+    )
+    ET.SubElement(svg, f"{{{_SVG_NS}}}metadata").text = json.dumps(
+        {
+            "geometry_hash": scene.geometry_hash,
+            "frame": asdict(scene.frame),
+            "fidelity_status": "unverified",
+            "assumptions": scene.assumptions,
+            "camera": {"azimuth": azimuth, "elevation": elevation},
+            "window_count": sum(len(rings) for rings in windows.values()),
+            "window_source": "actual_model_geometry" if windows else "none",
+        },
+        sort_keys=True,
+    )
+    ET.SubElement(svg, f"{{{_SVG_NS}}}style").text = (
+        ".wall {fill:#aa9859;stroke:#252525;stroke-width:1;stroke-linejoin:round}"
+        ".roof {fill:#7b3d3d;stroke:#252525;stroke-width:1;stroke-linejoin:round}"
+        ".window {fill:#7d9faa;stroke:#35515a;stroke-width:.8}"
+    )
+    ET.SubElement(
+        svg,
+        f"{{{_SVG_NS}}}rect",
+        {
+            "class": "background",
+            "width": "100%",
+            "height": "100%",
+            "fill": "white",
+        },
+    )
+    group = ET.SubElement(svg, f"{{{_SVG_NS}}}g", {"id": "scene"})
+    for drawable, visible in zip(drawables, _visible_regions(drawables, projection)):
+        if visible.is_empty or visible.area < 1e-10:
+            continue
+        surface = sources[id(drawable)]
+        _, points_3d, css = drawable.primitives[0]
+        fill = Polygon([projection.project(p) for p in points_3d]).intersection(visible)
+        face = ET.SubElement(
+            group,
+            f"{{{_SVG_NS}}}g",
+            {
+                "data-source-face": surface.source_face_id,
+                "data-source-object": surface.source_object_id,
+            },
+        )
+        ET.SubElement(
+            face,
+            f"{{{_SVG_NS}}}path",
+            {
+                "class": css,
+                "d": _clip_path_data(fill, canvas),
+                "fill-rule": "evenodd",
+                "style": "stroke:none",
+            },
+        )
+        # Only source boundaries are stroked, never the courtyard tiling diagonals.
+        if surface.source_face_id in quantized_edges:
+            edges = unary_union(
+                [
+                    LineString([projection.project(p) for p in edge])
+                    for edge, count in quantized_edges[surface.source_face_id].items()
+                    if count == 1
+                ]
+            )
+        else:
+            edges = unary_union(
+                [
+                    LineString([projection.project(p) for p in (*ring, ring[0])])
+                    for ring in (surface.exterior, *surface.interiors)
+                ]
+            )
+        data = _line_path_data(edges.intersection(visible), canvas)
+        if data:
+            ET.SubElement(
+                face,
+                f"{{{_SVG_NS}}}path",
+                {
+                    "class": css,
+                    "d": data,
+                    "style": "fill:none",
+                },
+            )
+        for _, ring, css in drawable.primitives[1:]:
+            polygon = Polygon([projection.project(point) for point in ring])
+            fill = polygon.intersection(visible)
+            if fill.is_empty or fill.area < 1e-10:
+                continue
+            ET.SubElement(
+                face,
+                f"{{{_SVG_NS}}}path",
+                {
+                    "class": css,
+                    "d": _clip_path_data(fill, canvas),
+                    "fill-rule": "evenodd",
+                    "style": "stroke:none",
+                },
+            )
+            stroke = _line_path_data(polygon.boundary.intersection(visible), canvas)
+            if stroke:
+                ET.SubElement(
+                    face,
+                    f"{{{_SVG_NS}}}path",
+                    {
+                        "class": css,
+                        "d": stroke,
+                        "style": "fill:none",
+                    },
+                )
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    tree = ET.ElementTree(svg)
+    try:
+        ET.indent(tree, space="  ")
+        tree.write(destination, encoding="utf-8", xml_declaration=True)
+    except OSError as error:
+        raise SvgError(f"Could not write reconstructed SVG: {error}") from error
     return destination

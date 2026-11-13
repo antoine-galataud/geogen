@@ -21,7 +21,6 @@ from shapely import force_2d, wkb, wkt
 from shapely.geometry import LineString, shape
 from shapely.geometry.base import BaseGeometry
 from shapely.geometry.polygon import Polygon, orient
-from shapely.ops import polylabel
 from shapely.ops import split as split_polygon
 from shapely.ops import transform, unary_union
 
@@ -41,7 +40,6 @@ MIN_FOOTPRINT_AREA = 1.0
 #: Roofs lower than this height (m) are kept flat.
 MIN_ROOF_HEIGHT = 0.5
 _MIN_VERTEX_DISTANCE = 1e-3
-_POLYLABEL_TOLERANCE = 0.5
 
 
 class GeometryError(ValueError):
@@ -111,14 +109,6 @@ def is_geographic(geometry: BaseGeometry) -> bool:
     """Tell whether a geometry looks like longitude/latitude degrees."""
     min_x, min_y, max_x, max_y = geometry.bounds
     return abs(min_x) <= 180 and abs(max_x) <= 180 and abs(min_y) <= 90 and abs(max_y) <= 90
-
-
-def to_projected(geometry: BaseGeometry, crs: str = LAMBERT_93) -> BaseGeometry:
-    """Return ``geometry`` in a metric CRS, reprojecting degrees if needed."""
-    if not is_geographic(geometry):
-        return geometry
-    LOGGER.debug("Geometry looks geographic, reprojecting to %s", crs)
-    return transform(_transformer(WGS84, crs).transform, geometry)
 
 
 def to_wgs84(x: float, y: float, crs: str = LAMBERT_93) -> tuple[float, float]:
@@ -203,19 +193,15 @@ def footprints_from_group(
     simplify_tolerance: float = DEFAULT_SIMPLIFY_TOLERANCE,
     default_roof_pitch: float = DEFAULT_ROOF_PITCH,
     default_window_to_wall_ratio: float | None = None,
-    crs: str | None = None,
+    crs: str,
 ) -> list[Footprint]:
-    """Convert a BDNB building group into extrudable footprints."""
+    """Convert a provider building into extrudable footprints in ``crs``."""
     if group.geometry is None:
         LOGGER.warning("Building %s has no geometry", group.code)
         return []
-    source_crs = getattr(group, "crs", None)
-    crs = crs or (source_crs if source_crs != WGS84 else None) or LAMBERT_93
     geometry = parse_geometry(group.geometry)
-    if source_crs is None:
-        geometry = to_projected(geometry, crs)  # historical BDNB public objects
-    elif source_crs != crs:
-        geometry = transform(_transformer(source_crs, crs).transform, geometry)
+    if group.crs != crs:
+        geometry = transform(_transformer(group.crs, crs).transform, geometry)
     parts = polygons(geometry)
     if not parts:
         LOGGER.warning("Building %s has an empty geometry", group.code)
@@ -258,33 +244,6 @@ def footprints_from_group(
             )
         )
     return footprints
-
-
-def roof_apex(
-    ring: tuple[tuple[float, float], ...], pitch: float, max_height: float
-) -> tuple[float, float, float] | None:
-    """Return the apex of a hip roof of ``pitch`` degrees covering ``ring``.
-
-    Legacy estimator retained for Python callers; exporters now use roof_faces.
-    The apex is the point of the footprint that is the farthest away from its boundary,
-    raised so that the widest roof faces have the requested pitch. ``None`` is returned when
-    the resulting roof would be negligible.
-    """
-    if pitch <= 0:
-        return None
-    polygon = Polygon(ring)
-    if not polygon.is_valid:
-        return None
-    try:
-        centre = polylabel(polygon, tolerance=_POLYLABEL_TOLERANCE)
-    except Exception as error:  # shapely raises various topological errors
-        LOGGER.debug("Cannot locate the apex of a roof: %s", error)
-        return None
-    radius = centre.distance(polygon.exterior)
-    height = min(math.tan(math.radians(pitch)) * radius, max_height)
-    if height < MIN_ROOF_HEIGHT:
-        return None
-    return float(centre.x), float(centre.y), float(height)
 
 
 def bounding_center(footprints: Iterable[Footprint]) -> tuple[float, float]:

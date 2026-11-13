@@ -1,0 +1,126 @@
+{
+  "schema_version": "1.0",
+  "description": "Synthetic flat box and courtyard demonstration, not real IGN or BDNB observations. The classified cloud is generated from the 0.5 m grid in tests/test_reconstruction_integration.py::_manifest. Ground is 100 m, roofs are 110 m; the assigned frame is EPSG:2154 / IGN69.",
+  "request": {
+    "addresses": ["Synthetic reconstruction test, France"],
+    "country": "FR",
+    "max_buildings": 10,
+    "provider_endpoint_hash": "e9f577dc6e69a0fe36ad435078419b4b8b8602497c3da51cfd4cfbb7bfa4b60d"
+  },
+  "frame": {
+    "projected_crs": "EPSG:2154",
+    "vertical_reference": "IGN69",
+    "origin": [700000.0, 6600000.0, 100.0]
+  },
+  "artifacts": {
+    "lidar_original": {
+      "path": "classified.original.laz",
+      "sha256": "edf14c3ad0a5826f1cf080bf464e44a30c6a7eefe5153193cdf2e6cf8199f8b0"
+    }
+  },
+  "buildings": [
+    {
+      "key": "FR:synthetic-group-box",
+      "type": "BuildingGroup",
+      "data": {
+        "batiment_groupe_id": "synthetic-group-box",
+        "batiment_construction_id": null,
+        "code": "synthetic-group-box",
+        "country": "FR",
+        "crs": "EPSG:2154",
+        "address": "Synthetic reconstruction test, France",
+        "geometry": {
+          "type": "Polygon",
+          "coordinates": [[[700000, 6600000], [700010, 6600000], [700010, 6600010], [700000, 6600010], [700000, 6600000]]]
+        },
+        "height": 10.0,
+        "ground_elevation": 100.0,
+        "storeys": 1,
+        "footprint_area": 100.0,
+        "fictitious_geometry": false
+      }
+    },
+    {
+      "key": "FR:synthetic-group-courtyard",
+      "type": "BuildingGroup",
+      "data": {
+        "batiment_groupe_id": "synthetic-group-courtyard",
+        "batiment_construction_id": null,
+        "code": "synthetic-group-courtyard",
+        "country": "FR",
+        "crs": "EPSG:2154",
+        "address": "Synthetic reconstruction test, France",
+        "geometry": {
+          "type": "Polygon",
+          "coordinates": [
+            [[700020, 6600000], [700040, 6600000], [700040, 6600020], [700020, 6600020], [700020, 6600000]],
+            [[700026, 6600006], [700026, 6600014], [700034, 6600014], [700034, 6600006], [700026, 6600006]]
+          ]
+        },
+        "height": 10.0,
+        "ground_elevation": 100.0,
+        "storeys": 1,
+        "footprint_area": 336.0,
+        "fictitious_geometry": false
+      }
+    }
+  ],
+  "units": [
+    {
+      "reconstruction_id": "box",
+      "identity": {
+        "bdnb_group_ids": ["synthetic-group-box"],
+        "bdnb_construction_ids": [],
+        "bdtopo_ids": [],
+        "rnb_ids": [],
+        "dataset_versions": [["synthetic", "1"]]
+      },
+      "original_wkt": "POLYGON ((700000 6600000, 700010 6600000, 700010 6600010, 700000 6600010, 700000 6600000))",
+      "working_wkt": "POLYGON ((700000 6600000, 700010 6600000, 700010 6600010, 700000 6600010, 700000 6600000))",
+      "geometry_revision": "dae046226a2630567194d6763f0478ae383772e58662868dcd3795c9db55e067",
+      "outline_type": "roofprint",
+      "role": "target",
+      "component_index": 0,
+      "crs": "EPSG:2154",
+      "decisions": ["synthetic_geometry_not_a_real_building"],
+      "links": [{
+        "reconstruction_id": "box",
+        "source_type": "bdnb_group",
+        "source_id": "synthetic-group-box",
+        "method": "manual",
+        "relationship": "one_to_one",
+        "attribute_scope": "group",
+        "confidence": "verified",
+        "reasons": ["synthetic_fixture_identity"]
+      }]
+    },
+    {
+      "reconstruction_id": "courtyard",
+      "identity": {
+        "bdnb_group_ids": ["synthetic-group-courtyard"],
+        "bdnb_construction_ids": [],
+        "bdtopo_ids": [],
+        "rnb_ids": [],
+        "dataset_versions": [["synthetic", "1"]]
+      },
+      "original_wkt": "POLYGON ((700020 6600000, 700040 6600000, 700040 6600020, 700020 6600020, 700020 6600000), (700026 6600006, 700026 6600014, 700034 6600014, 700034 6600006, 700026 6600006))",
+      "working_wkt": "POLYGON ((700020 6600000, 700040 6600000, 700040 6600020, 700020 6600020, 700020 6600000), (700026 6600006, 700026 6600014, 700034 6600014, 700034 6600006, 700026 6600006))",
+      "geometry_revision": "ed4c2b887774b430490e4a8d0ea30dd6917dd91887c2c3f5999207c19e356208",
+      "outline_type": "roofprint",
+      "role": "target",
+      "component_index": 0,
+      "crs": "EPSG:2154",
+      "decisions": ["synthetic_geometry_not_a_real_building"],
+      "links": [{
+        "reconstruction_id": "courtyard",
+        "source_type": "bdnb_group",
+        "source_id": "synthetic-group-courtyard",
+        "method": "manual",
+        "relationship": "one_to_one",
+        "attribute_scope": "group",
+        "confidence": "verified",
+        "reasons": ["synthetic_fixture_identity"]
+      }]
+    }
+  ]
+}

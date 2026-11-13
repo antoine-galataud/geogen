@@ -16,7 +16,7 @@ import logging
 import re
 import unicodedata
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from geogen.models import Building
@@ -82,6 +82,8 @@ class Envelope:
     glazing_orientations: tuple[str, ...] = ()
     #: Pitch of the roof in degrees, ``None`` for a flat or unknown roof.
     roof_pitch: float | None = None
+    #: Optional source properties, kept separate from inferred envelope geometry.
+    thermal_properties: dict = field(default_factory=dict, compare=False, hash=False)
 
 
 def _normalize(text: Any) -> str:
@@ -196,6 +198,8 @@ def envelope_from_group(
     default_window_to_wall_ratio: float | None = None,
 ) -> Envelope:
     """Approximate the envelope of a BDNB building group."""
+    from geogen.thermal_properties import ENVELOPE_FIELDS
+
     shape = getattr(group, "roof_shape", None)
     pitch = (
         0.0
@@ -213,4 +217,9 @@ def envelope_from_group(
         window_to_wall_ratio=window_to_wall_ratio(group, default_window_to_wall_ratio),
         glazing_orientations=glazing_orientations(group),
         roof_pitch=pitch,
+        thermal_properties={
+            "source_group_ids": [group.code],
+            "scope": "provider_building_values_applied_to_modeled_envelope",
+            "values": {key: getattr(group, key) for key in ENVELOPE_FIELDS},
+        },
     )

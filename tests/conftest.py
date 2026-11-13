@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import copy
+import json
+
 import pytest
 
 BASE_URL = "https://api.bdnb.test/v1/bdnb"
@@ -98,3 +101,70 @@ def unknown_table_error(table: str) -> dict:
         "hint": "Perhaps you meant the table 'api_open_202602a_1.batiment_groupe_ffo_bat'",
         "message": (f"Could not find the table 'api_open_202602a_1.{table}' in the schema cache"),
     }
+
+
+@pytest.fixture
+def offline_runtime(monkeypatch, tmp_path):
+    import requests
+
+    from geogen.reconstruction.runtime import DEFAULT_IMAGE, DockerRuntime
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+
+    def no_http(*args, **kwargs):
+        raise AssertionError("Offline CLI attempted a Python HTTP request")
+
+    monkeypatch.setattr(requests.Session, "send", no_http)
+    real_run = DockerRuntime.run
+    calls = []
+
+    def observed_run(self, args, work_dir, *, network=False):
+        assert self.offline is True
+        assert network is False
+        result = real_run(self, args, work_dir, network=network)
+        command = result.command
+        assert command[command.index("--network") + 1] == "none"
+        assert command[command.index("--pull") + 1] == "never"
+        assert self.image == DEFAULT_IMAGE
+        calls.append({"args": args, "result": result})
+        return result
+
+    monkeypatch.setattr(DockerRuntime, "run", observed_run)
+    return calls
+
+
+@pytest.fixture
+def reconstruction(monkeypatch, tmp_path):
+    from geogen.reconstruction.cache import ReconstructionCache
+    from geogen.reconstruction.pipeline import reconstruct_manifest
+    from tests.test_reconstruction_policy import EXAMPLE, Validator, captured_reconstruction
+
+    runtime = Validator()
+    manifest = json.loads(EXAMPLE.read_text())
+    evidence = {"fidelity_status": "evidence_passed", "metrics": {}, "reasons": []}
+    monkeypatch.setattr("geogen.reconstruction.roofer.reconstruct", captured_reconstruction)
+    monkeypatch.setattr(
+        "geogen.reconstruction.evidence.assess_evidence",
+        lambda scene, units, path: {
+            unit.reconstruction_id: copy.deepcopy(evidence) for unit in units
+        },
+    )
+    calls = []
+
+    def run(**policies):
+        work = tmp_path / str(len(calls))
+        work.mkdir()
+        report = {"units": []}
+        calls.append(report)
+        return reconstruct_manifest(
+            manifest,
+            EXAMPLE,
+            work,
+            runtime,
+            cache=ReconstructionCache(tmp_path / "cache"),
+            report=report,
+            **policies,
+        )
+
+    return run, runtime, manifest, evidence, calls
